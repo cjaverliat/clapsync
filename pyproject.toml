@@ -26,9 +26,9 @@ platforms = ["linux-64", "win-64"]
 [tool.pixi.pypi-dependencies]
 clapsync = { path = ".", editable = true }
 framepipe = { git = "https://github.com/cjaverliat/framepipe.git" }
-torch = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu128" }
-torchaudio = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu128" }
-torchcodec = { version = ">=0.13.0,<0.14.0", index = "https://download.pytorch.org/whl/cu128" }
+torch = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
+torchaudio = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
+torchcodec = { version = ">=0.13.0,<0.15.0", index = "https://download.pytorch.org/whl/cu130" }
 numpy = "*"
 av = "*"
 PySide6 = ">=6.7.0,<6.8"
@@ -36,16 +36,17 @@ PySide6 = ">=6.7.0,<6.8"
 [tool.pixi.dependencies]
 python = ">=3.10,<3.13"
 pip = "*"
+setuptools = "<82"  # torch 2.11 requires setuptools<82; conda pins 82 via pip
 pixi-pycharm = ">=0.0.11,<0.0.12"
 ffmpeg = "*"
 nuitka = ">=4.0.8,<5"
 libpython-static = ">=3.10.20,<4"
 
-[tool.pixi.feature.cuda128.system-requirements]
-cuda = "12.8"
+[tool.pixi.feature.cuda130.system-requirements]
+cuda = "13.0"
 
-[tool.pixi.feature.cuda128.dependencies]
-cuda-version = "12.8.*"
+[tool.pixi.feature.cuda130.dependencies]
+cuda-version = "13.0.*"
 cudnn = "*"
 
 [tool.pixi.feature.dev.dependencies]
@@ -57,8 +58,8 @@ weasyprint = "*"
 pytest = "*"
 
 [tool.pixi.environments]
-default = { features = ["cuda128"], solve-group = "default" }
-dev     = { features = ["cuda128", "dev"], solve-group = "default" }
+default = { features = ["cuda130"], solve-group = "default" }
+dev     = { features = ["cuda130", "dev"], solve-group = "default" }
 
 [tool.pytest.ini_options]
 markers = ["slow: requires torchcodec decode/encode with real codecs"]
