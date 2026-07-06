@@ -24,7 +24,7 @@ pixi install
 ## Quick start (Python)
 
 ```python
-from clapsync.core import sync_and_trim
+from clapsync.app import sync_and_trim
 
 # Probe, align by audio, trim to the common overlap, and export synced clips.
 results = sync_and_trim(
@@ -59,22 +59,35 @@ set the trim range, and export. See
 
 ## The API
 
-Everything the GUI and CLI do is available headless from `clapsync.core`:
+### Pure core (`clapsync.core`) — no torchcodec required
 
-| Function | What it does |
+Install with `pip install clapsync` (numpy + torch + torchaudio only).
+
+| Function / class | What it does |
 |---|---|
-| `probe(path)` | Read a clip's metadata (`MediaInfo`: duration, fps, audio, …). |
-| `compute_sync_offsets(media)` | Per-clip offset in seconds on a shared timeline. |
-| `common_time_range` / `full_time_range` | The overlap / union of all clips. |
-| `export_tracks(media, offsets, settings)` | Trim + export with full control (resolution, fps, codec). |
-| `sync_and_trim(paths, out)` | The one-call convenience: probe → sync → trim → export. |
+| `align_waveforms(waveforms, rates)` | Per-clip offset in seconds from raw audio tensors. |
+| `find_offset(ref, target, rate)` | Single-pair offset with sub-frame parabolic refinement. |
+| `TimeRange(start, end)` | Value type for a half-open time interval. |
+| `common_time_range(durations, offsets)` | The overlap where all clips are present. |
+| `full_time_range(durations, offsets)` | The union spanning every clip. |
+
+### App layer (`clapsync.app`) — requires `clapsync[app]` (torchcodec)
+
+| Function / class | What it does |
+|---|---|
+| `load_audio(path)` | Decode a file's audio track to a tensor via torchcodec. |
+| `compute_sync_offsets(paths)` | Probe + load + align; returns per-path offsets (seconds). |
+| `export_tracks(paths, offsets, settings)` | Trim + export with full control (resolution, fps, codec). |
+| `sync_and_trim(paths, out)` | One-call convenience: probe → sync → trim → export. |
+| `ExportSettings` / `ExportResult` | Configuration and result types for export. |
+| `clapsync.app.media.probe(path)` | Read a clip's metadata (`MediaInfo`: duration, fps, …). |
 
 Offsets are sub-frame accurate and kept as floating-point seconds end to end, so
 audio and video stay locked even when the true offset falls between frames.
 
 Runnable examples in [`examples/`](examples/):
 
-- [`find_sync.py`](examples/find_sync.py) — offsets + common/full range
+- [`find_sync.py`](examples/find_sync.py) — pure: torchaudio + `clapsync.core` only (no torchcodec)
 - [`auto_sync_trim.py`](examples/auto_sync_trim.py) — one-call sync & export
 - [`export_custom.py`](examples/export_custom.py) — manual pipeline, custom size/fps
 
@@ -110,9 +123,9 @@ pixi run build-clapsync
 
 ```
 src/clapsync/
-  core/    # headless API: probe, sync, time ranges, export (Qt-free)
-  io/      # torchcodec decode / encode wrappers
-  gui/     # PySide6 app (thin wrapper around core)
+  core/    # pure: MFCC align, time-range math (numpy/torch/torchaudio only)
+  app/     # file I/O, probe, torchcodec decode/encode, export, sync_and_trim
+  gui/     # PySide6 app (thin wrapper around app layer)
   cli.py   # sync / synctrim commands
 examples/  # runnable API examples
 ```

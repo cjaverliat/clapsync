@@ -13,13 +13,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from clapsync.core import (
-    ExportSettings,
-    common_time_range,
-    compute_sync_offsets,
-    export_tracks,
-    probe,
-)
+from clapsync.app import ExportSettings, compute_sync_offsets, export_tracks
+from clapsync.app.media import probe
+from clapsync.core import common_time_range
 
 
 def main() -> None:
@@ -32,10 +28,9 @@ def main() -> None:
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
 
-    media = [probe(p) for p in args.inputs]
-    offsets = compute_sync_offsets(media)
-
-    durations = [m.duration for m in media]
+    paths = args.inputs
+    offsets = compute_sync_offsets(paths)
+    durations = [probe(p).duration for p in paths]
     trim = common_time_range(durations, offsets)
 
     settings = ExportSettings(
@@ -46,7 +41,7 @@ def main() -> None:
         output_fps=args.fps,
     )
     results = export_tracks(
-        media,
+        paths,
         offsets,
         settings,
         progress=lambda f: print(f"\r{f * 100:5.1f}%", end="", flush=True),

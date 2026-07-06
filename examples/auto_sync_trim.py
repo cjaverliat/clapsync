@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from clapsync.core import sync_and_trim
+from clapsync.app import sync_and_trim
 
 
 def main() -> None:

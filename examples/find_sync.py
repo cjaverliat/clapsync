@@ -1,32 +1,35 @@
-"""Find sync offsets and the common/full time range for a set of clips.
+"""Find sync offsets and the common/full time range from audio waveforms.
 
-Works for audio-only files or videos (the audio track drives alignment). Every
-input must have an audio stream — audio-based sync needs audio.
+The caller loads audio (here with torchaudio) and passes tensors to the pure
+core — clapsync.core does no file I/O.
 
 Usage:
-    pixi run python examples/find_sync.py clip_a.mp4 clip_b.mp4 clip_c.wav
+    pixi run python examples/find_sync.py clip_a.wav clip_b.mp4 clip_c.wav
 """
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-from clapsync.core import (
-    common_time_range,
-    compute_sync_offsets,
-    full_time_range,
-    probe,
-)
+import torchaudio
+
+from clapsync.core import align_waveforms, common_time_range, full_time_range
 
 
 def main(paths: list[str]) -> None:
-    media = [probe(Path(p)) for p in paths]
-    offsets = compute_sync_offsets(media)
+    waveforms = []
+    rates = []
+    durations = []
+    for path in paths:
+        wave, rate = torchaudio.load(path)
+        waveforms.append(wave)
+        rates.append(rate)
+        durations.append(wave.shape[-1] / rate)
 
-    for info, offset in zip(media, offsets):
-        print(f"{info.path.name:30s} offset = {offset:+.4f} s  ({info.kind})")
+    offsets = align_waveforms(waveforms, rates)
 
-    durations = [m.duration for m in media]
+    for path, offset in zip(paths, offsets):
+        print(f"{path:30s} offset = {offset:+.4f} s")
+
     common = common_time_range(durations, offsets)
     full = full_time_range(durations, offsets)
     print(
