@@ -57,7 +57,7 @@ src/clapsync/
     export_dialog.py         # widgets only (worker logic removed)
     sync_editor.py           # main window (moved under gui/)
     timeline_widget.py  video_player.py  video_selection_dialog.py   # unchanged
-  cli.py                     # argparse headless entry (sync / trim subcommands)
+  cli.py                     # argparse headless entry (sync / synctrim subcommands)
   app.py                     # GUI entry (unchanged role)
 ```
 
@@ -124,6 +124,7 @@ class ExportSettings:
     target_width: int | None = None      # video only
     target_height: int | None = None     # video only
     output_fps: float | None = None       # video only
+    audio_format: str | None = None       # audio only; None = pass-through container
 
 @dataclass(frozen=True)
 class ExportResult:
@@ -169,7 +170,9 @@ MFCC lag is subframe (~5 ms hop). This must survive to the output:
   requantization. Frames are held/extended at boundaries, never snapped to the
   output frame grid.
 - Audio export: trim + exact silence pad (`adelay`/`apad`); no frame grid, so
-  trivially subframe-exact.
+  trivially subframe-exact. Output container is pass-through by default
+  (`ExportSettings.audio_format = None`) or user-selected (e.g. `"wav"`,
+  `"aac"`, `"flac"`).
 
 ## Parabolic refinement (strict improvement)
 
@@ -223,5 +226,5 @@ from I/O). Changes stay surgical — no unrelated refactoring of GUI widgets.
 - Sample-level / GCC-PHAT fine refinement.
 - Any GUI redesign beyond moving files and swapping worker internals to call
   core.
-- New export codecs/containers beyond the current H.264/AAC MP4 (video) and the
-  audio-format pass-through added for audio tracks.
+- New video export codecs/containers beyond the current H.264/AAC MP4. Audio
+  tracks support pass-through plus common user-selected formats (wav/aac/flac/…).
