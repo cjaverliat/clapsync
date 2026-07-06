@@ -50,7 +50,11 @@ def decode_frames_at(
     decoder = VideoDecoder(str(path), device=device)
     meta = decoder.metadata
     lo = meta.begin_stream_seconds or 0.0
+    # Fall back to duration_seconds so the upper clamp still applies when
+    # end_stream_seconds is absent; only skip it if neither is known.
     hi = meta.end_stream_seconds
+    if hi is None:
+        hi = meta.duration_seconds
     eps = 1e-3
     clamped = [
         min(max(s, lo), (hi - eps) if hi is not None else s) for s in seconds
