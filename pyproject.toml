@@ -26,9 +26,9 @@ platforms = ["linux-64", "win-64"]
 [tool.pixi.pypi-dependencies]
 clapsync = { path = ".", editable = true }
 framepipe = { git = "https://github.com/cjaverliat/framepipe.git" }
-torch = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
-torchaudio = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
-torchcodec = { version = ">=0.13.0,<0.15.0", index = "https://download.pytorch.org/whl/cu130" }
+torch = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu126" }
+torchaudio = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu126" }
+torchcodec = { version = ">=0.13.0,<0.15.0", index = "https://download.pytorch.org/whl/cu126" }
 numpy = "*"
 av = "*"
 PySide6 = ">=6.7.0,<6.8"
@@ -43,11 +43,11 @@ ffmpeg = "*"
 nuitka = ">=4.0.8,<5"
 libpython-static = ">=3.10.20,<4"
 
-[tool.pixi.feature.cuda130.system-requirements]
-cuda = "13.0"
+[tool.pixi.feature.cuda126.system-requirements]
+cuda = "12.6"
 
-[tool.pixi.feature.cuda130.dependencies]
-cuda-version = "13.0.*"
+[tool.pixi.feature.cuda126.dependencies]
+cuda-version = "12.6.*"
 cudnn = "*"
 
 [tool.pixi.feature.dev.dependencies]
@@ -58,8 +58,8 @@ pypandoc = "*"
 weasyprint = "*"
 
 [tool.pixi.environments]
-default = { features = ["cuda130"], solve-group = "default" }
-dev     = { features = ["cuda130", "dev"], solve-group = "default" }
+default = { features = ["cuda126"], solve-group = "default" }
+dev     = { features = ["cuda126", "dev"], solve-group = "default" }
 
 [tool.pytest.ini_options]
 markers = ["slow: requires torchcodec decode/encode with real codecs"]
