@@ -56,7 +56,6 @@ pandoc = "*"
 [tool.pixi.feature.dev.pypi-dependencies]
 pypandoc = "*"
 weasyprint = "*"
-pytest = "*"
 
 [tool.pixi.environments]
 default = { features = ["cuda130"], solve-group = "default" }
