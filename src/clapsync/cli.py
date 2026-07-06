@@ -12,7 +12,6 @@ from clapsync.core import common_time_range, full_time_range
 
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("inputs", nargs="+", type=Path, help="Media files")
-    p.add_argument("--method", choices=["mfcc", "envelope"], default="mfcc")
     p.add_argument("--refine", choices=["none", "parabolic"], default="parabolic")
     p.add_argument("--reference", type=int, default=0, help="Reference index")
 
@@ -22,7 +21,6 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     offsets = compute_sync_offsets(
         media,
         reference_index=args.reference,
-        method=args.method,
         refine=args.refine,
         progress=lambda f: print(
             f"\rsync {f * 100:3.0f}%", end="", file=sys.stderr
@@ -49,7 +47,6 @@ def _cmd_synctrim(args: argparse.Namespace) -> int:
     results = sync_and_trim(
         args.inputs,
         args.output,
-        method=args.method,
         refine=args.refine,
         trim=args.trim,
         reference_index=args.reference,

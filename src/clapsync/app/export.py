@@ -14,7 +14,7 @@ from clapsync.app.decode import decode_frames_at, load_audio
 from clapsync.app.encode import encode_clip
 from clapsync.app.media import MediaInfo, probe
 from clapsync.app.sync import compute_sync_offsets
-from clapsync.core.offsets import Method, Refine
+from clapsync.core.offsets import Refine
 from clapsync.core.timerange import TimeRange, common_time_range, full_time_range
 
 logger = logging.getLogger(__name__)
@@ -288,7 +288,6 @@ def sync_and_trim(
     paths: list[Path],
     output_dir: Path,
     *,
-    method: Method = "mfcc",
     refine: Refine = "parabolic",
     trim: Literal["common", "full"] = "common",
     reference_index: int = 0,
@@ -300,7 +299,6 @@ def sync_and_trim(
     Args:
         paths: Input media files.
         output_dir: Destination directory (created if missing).
-        method: Offset finder.
         refine: Peak refinement.
         trim: "common" (overlap) or "full" (union) output range.
         reference_index: Reference track.
@@ -322,7 +320,6 @@ def sync_and_trim(
     offsets = compute_sync_offsets(
         media,
         reference_index=reference_index,
-        method=method,
         refine=refine,
         progress=sync_progress,
         is_cancelled=is_cancelled,

@@ -4,9 +4,11 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from clapsync.app.media import MediaInfo
-from clapsync.core.offsets import Method, Refine, find_offset
+import torch
+
 from clapsync.app.decode import load_audio
+from clapsync.app.media import MediaInfo
+from clapsync.core.offsets import Refine, align_waveforms
 
 logger = logging.getLogger(__name__)
 
@@ -14,57 +16,43 @@ logger = logging.getLogger(__name__)
 def compute_sync_offsets(
     media: list[MediaInfo],
     reference_index: int = 0,
-    method: Method = "mfcc",
     refine: Refine = "parabolic",
     progress: Callable[[float], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> list[float]:
-    """Align every track to a reference by audio cross-correlation.
+    """Align probed tracks by loading their audio and cross-correlating.
 
     Args:
-        media: Probed tracks; each must have an audio stream to be aligned.
-        reference_index: Track whose timeline is the origin (offset 0).
-        method: Offset finder ("mfcc" or "envelope").
-        refine: Peak refinement ("parabolic" or "none").
-        progress: Optional 0..1 progress callback.
+        media: Probed tracks; each must have an audio stream.
+        reference_index: Track whose timeline is the origin.
+        refine: Peak refinement.
+        progress: Optional 0..1 callback.
         is_cancelled: Optional cooperative cancel check.
 
     Returns:
-        Per-track offset in seconds; offset[reference_index] == 0.0. Positive
-        means the track starts after the reference. Tracks that fail to load or
-        correlate get 0.0.
+        Per-track offset in seconds; offset[reference_index] == 0.0.
     """
-    n = len(media)
-    ref_fps = media[reference_index].fps or 30.0
-
-    # Audio sync is impossible without audio — fail hard (do not silently
-    # return zero offsets, which would hide the misconfiguration).
     missing = [str(m.path) for m in media if not m.has_audio]
     if missing:
         raise ValueError(
             "cannot sync tracks without an audio stream: " + ", ".join(missing)
         )
 
-    ref_wave, ref_rate = load_audio(media[reference_index].path)
-
-    lags: list[float] = [0.0] * n
+    n = len(media)
+    waveforms: list[torch.Tensor] = []
+    rates: list[int] = []
     for i, info in enumerate(media):
         if is_cancelled is not None and is_cancelled():
-            break
-        if i != reference_index:
-            try:
-                wave, rate = load_audio(info.path)
-                _, lag_s = find_offset(
-                    ref_wave, ref_rate, wave, rate, ref_fps,
-                    method=method, refine=refine,
-                )
-            except Exception as exc:  # noqa: BLE001 — one bad track must not abort all
-                logger.warning("offset failed for %s: %s — using 0.0", info.path, exc)
-                lag_s = 0.0
-            lags[i] = lag_s
-        # One progress tick per track (reference included); the final track
-        # lands on 1.0. On cancellation we break first, so no false 100%.
+            return [0.0] * n
+        wave, rate = load_audio(info.path)
+        waveforms.append(wave)
+        rates.append(rate)
         if progress is not None:
-            progress((i + 1) / n)
+            progress(0.9 * (i + 1) / n)
 
-    return lags
+    offsets = align_waveforms(
+        waveforms, rates, refine=refine, reference_index=reference_index,
+    )
+    if progress is not None:
+        progress(1.0)
+    return offsets
