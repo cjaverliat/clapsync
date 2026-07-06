@@ -170,8 +170,9 @@ def find_offset_envelope(
                       raw integer argmax.
 
     Returns:
-        (lag_frames, lag_seconds): signed lag. Positive means waveform starts
-        after ref_waveform and should be delayed by that many frames to align.
+        (lag_frames, lag_seconds): signed lag. Positive means waveform leads
+        (starts before) ref_waveform; negative means it starts later. Used as
+        offset with the export convention shared_time = local_time + offset.
     """
     if ref_rate != rate:
         waveform = AF.resample(waveform, orig_freq=rate, new_freq=ref_rate)
@@ -183,10 +184,11 @@ def find_offset_envelope(
     peak_idx = int(np.argmax(corr))
     peak = _parabolic_peak(corr, peak_idx) if refine == "parabolic" else float(peak_idx)
 
-    # Zero-lag is at index len(env_sub). The convolution-with-time-reversed-sub
-    # trick produces corr[k] = xcorr[N-1-k], so sub delayed by d gives peak at
-    # N-d → lag = N - peak (positive when sub is later than ref).
-    lag_frac = len(env_sub) - peak
+    # Zero-lag is at index len(env_sub) due to the prepended zero in
+    # _fft_correlate. Sign convention (matches export clip_window, where
+    # shared = local + offset): positive lag = query leads the reference,
+    # negative = query is delayed/later.
+    lag_frac = peak - len(env_sub)
     lag_seconds = lag_frac / fps
     lag_frames = round(lag_frac)
 
@@ -339,7 +341,7 @@ def find_offset_mfcc(
 
     Returns:
         (lag_frames, lag_seconds): signed lag at video-frame and sub-frame resolution.
-        Positive means waveform starts after ref_waveform.
+        Positive means waveform leads (starts before) ref_waveform.
     """
     if ref_rate != rate:
         waveform = AF.resample(waveform, orig_freq=rate, new_freq=ref_rate)
@@ -358,10 +360,10 @@ def find_offset_mfcc(
     peak_idx = int(np.argmax(corr))
     peak = _parabolic_peak(corr, peak_idx) if refine == "parabolic" else float(peak_idx)
 
-    # Zero-lag is at index T_sub - 1. The convolution-with-time-reversed-sub
-    # trick produces corr[k] = xcorr[T_sub-1-k], so sub delayed by d gives
-    # peak at T_sub-1-d → lag = (T_sub-1) - peak (positive when sub is later).
-    lag_hops = (mfcc_sub.shape[1] - 1) - peak
+    # Zero-lag is at index T_sub - 1 (see _mfcc_cross_correlate). Sign
+    # convention matches find_offset_envelope / export clip_window: positive
+    # lag = query leads the reference, negative = query is delayed/later.
+    lag_hops = peak - (mfcc_sub.shape[1] - 1)
     lag_seconds = lag_hops * hop_length / ref_rate
     lag_frames = round(lag_seconds * fps)
 
@@ -421,8 +423,9 @@ def find_offset(
         mel_scale:    [mfcc] Mel scale type ("htk" or "slaney").
 
     Returns:
-        (lag_frames, lag_seconds): signed lag. Positive means waveform starts
-        after ref_waveform and should be delayed by that many frames to align.
+        (lag_frames, lag_seconds): signed lag. Positive means waveform leads
+        (starts before) ref_waveform; negative means it starts later. Used as
+        offset with the export convention shared_time = local_time + offset.
 
     Raises:
         ValueError: If *method* is not "mfcc" or "envelope".
