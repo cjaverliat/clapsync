@@ -20,6 +20,7 @@ def test_probe_video(rgb_video):
     path, fps, n, w, h = rgb_video(seconds=1.0, fps=30.0, w=64, h=48)
     info = probe(path)
     assert info.kind == "video"
+    assert info.has_audio is False   # rgb_video fixture is video-only
     assert info.width == w and info.height == h
     assert abs(info.fps - 30.0) < 0.5
     assert abs(info.duration - 1.0) < 0.1

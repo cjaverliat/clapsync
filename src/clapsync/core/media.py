@@ -69,7 +69,7 @@ def probe(path: Path) -> MediaInfo:
     if has_audio:
         return MediaInfo(
             path=path,
-            duration=audio_dur or 0.0,
+            duration=audio_dur if audio_dur is not None else 0.0,
             has_audio=True,
             kind="audio",
             sample_rate=sample_rate,
