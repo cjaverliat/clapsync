@@ -38,28 +38,25 @@ def compute_sync_offsets(
     ref_fps = media[reference_index].fps or 30.0
 
     ref_wave, ref_rate = load_audio(media[reference_index].path)
-    if progress is not None:
-        progress(1.0 / n)
 
     lags: list[float] = [0.0] * n
     for i, info in enumerate(media):
         if is_cancelled is not None and is_cancelled():
             break
-        if i == reference_index:
-            continue
-        try:
-            wave, rate = load_audio(info.path)
-            _, lag_s = find_offset(
-                ref_wave, ref_rate, wave, rate, ref_fps,
-                method=method, refine=refine,
-            )
-        except Exception as exc:  # noqa: BLE001 — one bad track must not abort all
-            logger.warning("offset failed for %s: %s — using 0.0", info.path, exc)
-            lag_s = 0.0
-        lags[i] = lag_s
+        if i != reference_index:
+            try:
+                wave, rate = load_audio(info.path)
+                _, lag_s = find_offset(
+                    ref_wave, ref_rate, wave, rate, ref_fps,
+                    method=method, refine=refine,
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad track must not abort all
+                logger.warning("offset failed for %s: %s — using 0.0", info.path, exc)
+                lag_s = 0.0
+            lags[i] = lag_s
+        # One progress tick per track (reference included); the final track
+        # lands on 1.0. On cancellation we break first, so no false 100%.
         if progress is not None:
             progress((i + 1) / n)
 
-    if progress is not None:
-        progress(1.0)
     return lags
