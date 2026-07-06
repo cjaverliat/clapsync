@@ -17,8 +17,10 @@ ffprobe, PyAV, and framepipe) — is split into two projects:
   playback engine (framepipe `VideoGroupDecoder`) on N torchcodec
   `VideoDecoder`s, rewire GUI workers, and remove framepipe entirely.
 
-torchcodec links the ffmpeg *libraries* internally, so "drop ffmpeg" means
-removing the CLI/subprocess and ffprobe dependencies — codecs remain.
+"Drop ffmpeg" means removing **our** ffmpeg CLI/subprocess and ffprobe calls.
+torchcodec dynamically links the ffmpeg *shared libraries* at runtime, so the
+`ffmpeg` conda package **stays installed** as torchcodec's backend — we simply
+stop shelling out to it. See Dependencies below.
 
 ## Requirements
 
@@ -227,9 +229,29 @@ old integer-peak behavior.
 | `io/ffmpeg.py` (ffmpeg subprocess) | `io/encode.py` (torchcodec Encoder) |
 | `get_video_info` / ffprobe | `core/media.probe` (torchcodec metadata) |
 
-GUI preview keeps framepipe `VideoGroupDecoder` until Project 2. `pyproject.toml`
-adds `torchcodec >=0.13`; removes the `ffmpeg` binary dep, `av`; framepipe stays
-(preview only) until Project 2.
+GUI preview keeps framepipe `VideoGroupDecoder` until Project 2 (so `av`/PyAV,
+a framepipe dep, also stays until then).
+
+## Dependencies
+
+torchcodec 0.13 requires **torch ≥ 2.11** and needs the ffmpeg **shared
+libraries** (major 4–8) present at runtime; it neither bundles nor pip-installs
+ffmpeg. CUDA and Python pins are unaffected: torch 2.11 still ships **cu128**
+(CUDA 12.8) wheels, and both torch 2.11 and torchcodec 0.13 support Python
+3.10–3.14 (current `>=3.10,<3.13` sits inside).
+
+`pyproject.toml` deltas:
+
+| Dep | From | To |
+|---|---|---|
+| `torch`, `torchaudio` | `>=2.8,<2.9` (cu128) | `>=2.11,<2.12` (**still cu128**) |
+| `torchcodec` | — | `>=0.13` (cu128 build, pytorch index) |
+| `ffmpeg` (conda) | present, called via subprocess | **kept** — now torchcodec's shared-lib backend, not called |
+| `av` (PyAV) | present | **kept** in Project 1 (framepipe preview dep); removed in Project 2 |
+| `framepipe` | present | **kept** (preview only); removed in Project 2 |
+
+Note: cu128 is the last CUDA-12.8 stop — torch after 2.11 replaces it with
+cu130 (CUDA 13.0). Staying on 2.11 keeps the current 12.8 toolchain.
 
 ## Testing
 
