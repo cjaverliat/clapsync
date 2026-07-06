@@ -1,13 +1,5 @@
-"""clapsync headless API: sync, time ranges, and muxed trim/export."""
-from clapsync.core.export import (
-    ExportResult,
-    ExportSettings,
-    export_tracks,
-    sync_and_trim,
-)
-from clapsync.core.media import MediaInfo, probe
-from clapsync.core.offsets import Method, Refine, find_offset
-from clapsync.core.sync import compute_sync_offsets
+"""clapsync pure core: MFCC audio sync and time-range math (no I/O)."""
+from clapsync.core.offsets import Refine, align_waveforms, find_offset
 from clapsync.core.timerange import (
     TimeRange,
     common_time_range,
@@ -15,17 +7,10 @@ from clapsync.core.timerange import (
 )
 
 __all__ = [
-    "MediaInfo",
-    "probe",
+    "align_waveforms",
+    "find_offset",
     "TimeRange",
     "common_time_range",
     "full_time_range",
-    "compute_sync_offsets",
-    "ExportSettings",
-    "ExportResult",
-    "export_tracks",
-    "sync_and_trim",
-    "find_offset",
-    "Method",
     "Refine",
 ]

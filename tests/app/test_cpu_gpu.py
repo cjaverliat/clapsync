@@ -9,9 +9,9 @@ import torch
 
 from torchcodec.decoders import VideoDecoder
 
-from clapsync.core.export import _nvenc_available, sync_and_trim
-from clapsync.io.decode import decode_frames_at
-from clapsync.io.encode import encode_clip
+from clapsync.app.decode import decode_frames_at
+from clapsync.app.encode import encode_clip
+from clapsync.app.export import _nvenc_available, sync_and_trim
 
 cuda_only = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="needs a CUDA GPU"

@@ -1,6 +1,23 @@
 import pytest
 
-from clapsync.core.export import sync_and_trim, ExportResult
+from clapsync.app import export_tracks, compute_sync_offsets, ExportSettings
+from clapsync.app.export import sync_and_trim, ExportResult
+from clapsync.app.media import probe
+from clapsync.core import common_time_range
+
+
+@pytest.mark.slow
+def test_export_tracks_takes_paths(av_video, tmp_path):
+    a, *_ = av_video(seconds=1.0, fps=30.0, w=256, h=144, name="a.mp4")
+    b, *_ = av_video(seconds=1.0, fps=30.0, w=256, h=144, name="b.mp4")
+    paths = [a, b]
+    offsets = compute_sync_offsets(paths)
+    durations = [probe(p).duration for p in paths]
+    settings = ExportSettings(
+        trim=common_time_range(durations, offsets), output_dir=tmp_path,
+    )
+    results = export_tracks(paths, offsets, settings)
+    assert all(r.ok for r in results), [r.error for r in results]
 
 
 @pytest.mark.slow

@@ -8,13 +8,11 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
-from clapsync.core import (
+from clapsync.app import (
     ExportResult,
     ExportSettings,
-    MediaInfo,
     compute_sync_offsets,
     export_tracks,
-    probe,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,9 +30,9 @@ class OffsetWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            media = [probe(p) for p in self._paths]
             offsets = compute_sync_offsets(
-                media, progress=lambda f: self.progress_value.emit(int(f * 1000)),
+                self._paths,
+                progress=lambda f: self.progress_value.emit(int(f * 1000)),
             )
             self.finished.emit(offsets)
         except Exception as exc:  # noqa: BLE001
@@ -109,12 +107,12 @@ class ExportWorker(QObject):
 
     def __init__(
         self,
-        media: list[MediaInfo],
+        paths: list[Path],
         offsets: list[float],
         settings: ExportSettings,
     ) -> None:
         super().__init__()
-        self._media = media
+        self._paths = paths
         self._offsets = offsets
         self._settings = settings
         self._cancelled = False
@@ -124,7 +122,7 @@ class ExportWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        n = len(self._media)
+        n = len(self._paths)
 
         def _on_progress(frac: float) -> None:
             # export_tracks reports (i+1)/n after each track; derive the
@@ -135,7 +133,7 @@ class ExportWorker(QObject):
             self.status.emit(f"Exporting {done}/{n}")
 
         results = export_tracks(
-            self._media,
+            self._paths,
             self._offsets,
             self._settings,
             progress=_on_progress,

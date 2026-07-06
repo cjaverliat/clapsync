@@ -1,8 +1,8 @@
-"""Integration tests for clapsync.io.decode."""
+"""Integration tests for clapsync.app.decode."""
 import pytest
 import torch
 
-from clapsync.io.decode import load_audio, decode_frames_at
+from clapsync.app.decode import load_audio, decode_frames_at
 
 
 @pytest.mark.slow

@@ -1,8 +1,8 @@
-"""Integration tests for clapsync.io.encode."""
+"""Integration tests for clapsync.app.encode."""
 import pytest
 import torch
 
-from clapsync.io.encode import encode_clip, pick_video_codec
+from clapsync.app.encode import encode_clip, pick_video_codec
 
 
 def test_pick_video_codec_is_pure():
