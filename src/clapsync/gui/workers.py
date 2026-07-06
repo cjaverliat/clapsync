@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -123,14 +124,21 @@ class ExportWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        def _status(i: int) -> None:
-            self.status.emit(f"Exporting {i + 1}/{len(self._media)}")
+        n = len(self._media)
+
+        def _on_progress(frac: float) -> None:
+            # export_tracks reports (i+1)/n after each track; derive the
+            # current item index so the dialog shows "Exporting i/n" — the
+            # core API exposes only a float callback, not a status string.
+            self.progress.emit(frac)
+            done = min(n, max(1, math.ceil(frac * n)))
+            self.status.emit(f"Exporting {done}/{n}")
 
         results = export_tracks(
             self._media,
             self._offsets,
             self._settings,
-            progress=lambda f: self.progress.emit(f),
+            progress=_on_progress,
             is_cancelled=lambda: self._cancelled,
         )
         self.finished.emit(results)
