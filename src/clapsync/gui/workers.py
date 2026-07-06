@@ -8,14 +8,13 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
-from clapsync.core import (
+from clapsync.app import (
     ExportResult,
     ExportSettings,
-    MediaInfo,
     compute_sync_offsets,
     export_tracks,
-    probe,
 )
+from clapsync.app.media import MediaInfo, probe
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 import pytest
 
-from clapsync.core.media import probe, MediaInfo
+from clapsync.app.media import probe, MediaInfo
 
 
 @pytest.mark.slow

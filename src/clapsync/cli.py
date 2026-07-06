@@ -5,13 +5,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from clapsync.core import (
-    common_time_range,
-    compute_sync_offsets,
-    full_time_range,
-    probe,
-    sync_and_trim,
-)
+from clapsync.app import compute_sync_offsets, sync_and_trim
+from clapsync.app.media import probe
+from clapsync.core import common_time_range, full_time_range
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:

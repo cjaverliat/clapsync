@@ -1,8 +1,8 @@
 import torch
 
-import clapsync.core.sync as sync_mod
-from clapsync.core.media import MediaInfo
-from clapsync.core.sync import compute_sync_offsets
+import clapsync.app.sync as sync_mod
+from clapsync.app.media import MediaInfo
+from clapsync.app.sync import compute_sync_offsets
 
 
 def _info(name, dur, fps=25.0):

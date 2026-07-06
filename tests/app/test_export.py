@@ -1,6 +1,6 @@
 import pytest
 
-from clapsync.core.export import sync_and_trim, ExportResult
+from clapsync.app.export import sync_and_trim, ExportResult
 
 
 @pytest.mark.slow

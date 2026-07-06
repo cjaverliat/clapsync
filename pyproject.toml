@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-clapsync = "clapsync.app:main"
+clapsync = "clapsync.gui.app:main"
 clapsync-cli = "clapsync.cli:main"
 
 [build-system]

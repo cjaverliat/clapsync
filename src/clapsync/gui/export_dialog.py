@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from clapsync.core import MediaInfo
+from clapsync.app.media import MediaInfo
 
 logger = logging.getLogger(__name__)
 

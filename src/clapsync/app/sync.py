@@ -4,9 +4,9 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from clapsync.core.media import MediaInfo
+from clapsync.app.media import MediaInfo
 from clapsync.core.offsets import Method, Refine, find_offset
-from clapsync.io.decode import load_audio
+from clapsync.app.decode import load_audio
 
 logger = logging.getLogger(__name__)
 

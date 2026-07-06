@@ -24,7 +24,9 @@ from PySide6.QtWidgets import (
 )
 
 from framepipe import VideoInfo, get_video_info, get_display_size
-from clapsync.core import ExportResult, ExportSettings, TimeRange, probe
+from clapsync.app import ExportResult, ExportSettings
+from clapsync.app.media import probe
+from clapsync.core import TimeRange
 from clapsync.gui.export_dialog import ExportDialog
 from clapsync.gui.video_player import VideoPlayerWidget, PlaybackClock, VideoGroupWorker
 from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState

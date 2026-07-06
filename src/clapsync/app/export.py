@@ -10,12 +10,12 @@ from typing import Callable, Literal
 
 import torch
 
-from clapsync.core.media import MediaInfo, probe
+from clapsync.app.decode import decode_frames_at, load_audio
+from clapsync.app.encode import encode_clip
+from clapsync.app.media import MediaInfo, probe
+from clapsync.app.sync import compute_sync_offsets
 from clapsync.core.offsets import Method, Refine
-from clapsync.core.sync import compute_sync_offsets
 from clapsync.core.timerange import TimeRange, common_time_range, full_time_range
-from clapsync.io.decode import decode_frames_at, load_audio
-from clapsync.io.encode import encode_clip
 
 logger = logging.getLogger(__name__)
 
