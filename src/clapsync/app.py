@@ -8,15 +8,15 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QDialog
 
-from kineo_sync.gui.video_selection_dialog import VideoSelectionDialog
-from kineo_sync.offset_worker import compute_offsets_with_progress
-from kineo_sync.sync_editor import SyncEditorWindow
+from clapsync.gui.video_selection_dialog import VideoSelectionDialog
+from clapsync.offset_worker import compute_offsets_with_progress
+from clapsync.sync_editor import SyncEditorWindow
 
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Kineo audio sync tool")
+    parser = argparse.ArgumentParser(description="clapsync — multi-camera audio sync tool")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     args, qt_args = parser.parse_known_args()
 

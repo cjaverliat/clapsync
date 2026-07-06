@@ -1,31 +1,28 @@
-# kineo-sync
+# clapsync
 
 Multi-camera audio-based synchronization and trimming tool. Aligns several videos
 recorded simultaneously by different cameras (via MFCC audio fingerprinting), lets you
-fine-tune the offsets manually, and exports trimmed, synchronized clips ready for
-`kineo-reconstruct`.
-
-Extracted as a standalone project from [kineo](../kineo-pro) (`kineo.sync_trim`).
+fine-tune the offsets manually, and exports trimmed, synchronized clips.
 
 ## Environment: pixi
 
 Run everything through [pixi](https://pixi.sh) — no bare `python`/`pip`/`conda`.
 
 ```bash
-pixi install            # create the environment
-pixi run kineo-sync     # launch the app
+pixi install         # create the environment
+pixi run clapsync    # launch the app
 ```
 
 ## Usage
 
-`pixi run kineo-sync` opens the video-selection dialog. See
-[docs/kineo-sync/kineo-sync.md](docs/kineo-sync/kineo-sync.md) for the full user manual.
+`pixi run clapsync` opens the video-selection dialog. See
+[docs/clapsync/clapsync.md](docs/clapsync/clapsync.md) for the full user manual.
 
 ## Layout
 
 ```
-src/kineo_sync/
-  app.py                 # entry point (kineo-sync)
+src/clapsync/
+  app.py                 # entry point (clapsync)
   sync_editor.py         # main editor window
   offset_worker.py       # audio-offset computation (background)
   export_dialog.py       # export settings + worker
@@ -41,5 +38,5 @@ PySide6, PyAV, numpy, torch + torchaudio (cu128), and an `ffmpeg` binary (provid
 ## Build a standalone binary
 
 ```bash
-pixi run build-kineo-sync
+pixi run build-clapsync
 ```

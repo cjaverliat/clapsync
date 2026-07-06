@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from kineo_sync.io.video import VideoInfo
-from kineo_sync.io.ffmpeg import export_synced_video
+from framepipe import VideoInfo
+from clapsync.io.ffmpeg import export_synced_video
 
 logger = logging.getLogger(__name__)
 

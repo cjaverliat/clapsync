@@ -6,9 +6,9 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
-from kineo_sync.audio_sync import find_offset
-from kineo_sync.io.audio import load_audio_from_video
-from kineo_sync.io.video import get_video_info
+from clapsync.audio_sync import find_offset
+from clapsync.io.audio import load_audio_from_video
+from framepipe import get_video_info
 
 logger = logging.getLogger(__name__)
 

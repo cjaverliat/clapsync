@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSizePolicy
 
-from kineo_sync.io.video import VideoGroupDecoder, get_display_size
+from framepipe import VideoGroupDecoder, get_display_size
 
 
 @dataclass

@@ -23,10 +23,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from kineo_sync.io.video import VideoInfo, get_video_info, get_display_size
-from kineo_sync.gui.video_player import VideoPlayerWidget, PlaybackClock, VideoGroupWorker
-from kineo_sync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
-from kineo_sync.export_dialog import ExportDialog, ExportResult, ExportWorker
+from framepipe import VideoInfo, get_video_info, get_display_size
+from clapsync.gui.video_player import VideoPlayerWidget, PlaybackClock, VideoGroupWorker
+from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
+from clapsync.export_dialog import ExportDialog, ExportResult, ExportWorker
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class SyncEditorWindow(QMainWindow):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("kineo-sync")
+        self.setWindowTitle("clapsync")
         self.resize(1200, 700)
 
         self._video_infos: list[VideoInfo] = []

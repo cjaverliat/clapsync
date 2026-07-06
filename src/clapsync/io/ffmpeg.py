@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from kineo_sync.io.video import get_video_info
+from framepipe import get_video_info
 
 logger = logging.getLogger(__name__)
 

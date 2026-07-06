@@ -21,7 +21,7 @@ class VideoSelectionDialog(QDialog):
     def __init__(
         self,
         parent: QWidget | None = None,
-        title: str = "kineo-sync — Select Videos",
+        title: str = "clapsync — Select Videos",
         description: str = "Select two or more video files to synchronize:",
     ) -> None:
         super().__init__(parent)

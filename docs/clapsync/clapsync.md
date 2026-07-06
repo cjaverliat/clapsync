@@ -1,8 +1,8 @@
-# Manuel Utilisateur — kineo-sync
+# Manuel Utilisateur — clapsync
 
 ## 1. Introduction
 
-**kineo-sync** est un outil de synchronisation et de découpe multi-caméras. Son objectif est d'aligner automatiquement plusieurs enregistrements vidéo tournés simultanément par des caméras différentes, puis d'en exporter des versions découpées et synchronisées.
+**clapsync** est un outil de synchronisation et de découpe multi-caméras. Son objectif est d'aligner automatiquement plusieurs enregistrements vidéo tournés simultanément par des caméras différentes, puis d'en exporter des versions découpées et synchronisées.
 
 ### Points clés :
 
@@ -103,4 +103,4 @@ Le logiciel génère pour chaque caméra un nouveau fichier nommé `{nom_origina
 À la fin du processus, vous obtenez un dossier contenant $N$ fichiers vidéo :
 
 1. **Synchronisés** : Ils commencent tous au même instant temporel.
-2. **Identiques en durée** : Parfaits pour une importation directe dans **kineo-reconstruct**.
+2. **Identiques en durée** : Parfaits pour une importation directe dans un pipeline de reconstruction en aval.

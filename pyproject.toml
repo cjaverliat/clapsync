@@ -1,12 +1,12 @@
 [project]
-name = "kineo-sync"
+name = "clapsync"
 version = "0.1.0"
-description = "Multi-camera audio-based synchronization and trimming tool (extracted from kineo)"
+description = "Multi-camera audio-based synchronization and trimming tool"
 requires-python = ">=3.10,<3.13"
 dependencies = []
 
 [project.scripts]
-kineo-sync = "kineo_sync.app:main"
+clapsync = "clapsync.app:main"
 
 [build-system]
 build-backend = "setuptools.build_meta"
@@ -23,7 +23,8 @@ channels = ["conda-forge"]
 platforms = ["linux-64", "win-64"]
 
 [tool.pixi.pypi-dependencies]
-kineo-sync = { path = ".", editable = true }
+clapsync = { path = ".", editable = true }
+framepipe = { git = "https://github.com/cjaverliat/framepipe.git" }
 torch = { version = ">=2.8.0,<2.9.0", index = "https://download.pytorch.org/whl/cu128" }
 torchaudio = { version = ">=2.8.0,<2.9.0", index = "https://download.pytorch.org/whl/cu128" }
 numpy = "*"
@@ -57,15 +58,15 @@ default = { features = ["cuda128"], solve-group = "default" }
 dev     = { features = ["cuda128", "dev"], solve-group = "default" }
 
 [tool.pixi.tasks]
-kineo-sync = "kineo-sync"
+clapsync = "clapsync"
 
-[tool.pixi.tasks.build-kineo-sync]
+[tool.pixi.tasks.build-clapsync]
 cmd = """
 nuitka \
   --output-dir=outputs \
-  --output-filename=kineo-sync \
-  --include-package=kineo_sync \
+  --output-filename=clapsync \
+  --include-package=clapsync \
   --show-progress \
-  src/kineo_sync/app.py
+  src/clapsync/app.py
 """
-description = "Build standalone kineo-sync binary"
+description = "Build standalone clapsync binary"
