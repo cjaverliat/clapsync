@@ -1,0 +1,702 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, Signal
+from PySide6.QtGui import (
+    QColor, QFont, QFontMetricsF, QPainter, QPalette, QPen, QBrush, QPainterPath,
+)
+from PySide6.QtWidgets import QInputDialog, QScrollBar, QWidget
+
+HEADER_H = 28
+TRACK_H = 40
+TRACK_PAD = 6
+SCROLLBAR_H = 14  # horizontal scrollbar height
+SCROLLBAR_W = 14  # vertical scrollbar width
+HANDLE_W = 10
+MIN_ZOOM = 10.0    # px/s
+MAX_ZOOM = 2000.0  # px/s
+_SCROLL_MARGIN = 10  # pixels of padding before time=0
+
+TRACK_COLORS = [
+    QColor("#4A90D9"),
+    QColor("#E67E22"),
+    QColor("#2ECC71"),
+    QColor("#9B59B6"),
+    QColor("#E74C3C"),
+    QColor("#1ABC9C"),
+    QColor("#F39C12"),
+]
+
+LOCKED_TRACK_COLOR = QColor("#999999")
+PLAYHEAD_COLOR = QColor("#D93025")
+TRACK_BORDER_ALPHA = 160
+
+_THEME_LIGHT = {
+    "ruler_bg":       QColor("#E8E8E8"),
+    "track_area_bg":  QColor("#F5F5F5"),
+    "ruler_text":     QColor("#444444"),
+    "ruler_tick":     QColor("#888888"),
+    "ruler_border":   QColor("#CCCCCC"),
+    "handle":         QColor("#333333"),
+    "trim_overlay":   QColor(0, 0, 0, 50),
+}
+
+_THEME_DARK = {
+    "ruler_bg":       QColor("#2A2A2A"),
+    "track_area_bg":  QColor("#1E1E1E"),
+    "ruler_text":     QColor("#CCCCCC"),
+    "ruler_tick":     QColor("#666666"),
+    "ruler_border":   QColor("#444444"),
+    "handle":         QColor("#DDDDDD"),
+    "trim_overlay":   QColor(0, 0, 0, 80),
+}
+
+_SCROLLBAR_STYLE_LIGHT = """
+QScrollBar:horizontal {
+    background: #E8E8E8;
+    height: 14px;
+    margin: 0;
+    border: none;
+    border-top: 1px solid #CCCCCC;
+}
+QScrollBar::handle:horizontal {
+    background: #AAAAAA;
+    min-width: 20px;
+    border-radius: 3px;
+    margin: 2px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #888888;
+}
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0;
+    height: 0;
+}
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: none;
+}
+"""
+
+_SCROLLBAR_STYLE_DARK = """
+QScrollBar:horizontal {
+    background: #2A2A2A;
+    height: 14px;
+    margin: 0;
+    border: none;
+    border-top: 1px solid #444444;
+}
+QScrollBar::handle:horizontal {
+    background: #555555;
+    min-width: 20px;
+    border-radius: 3px;
+    margin: 2px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #777777;
+}
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0;
+    height: 0;
+}
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: none;
+}
+"""
+
+_SCROLLBAR_VERT_STYLE_LIGHT = """
+QScrollBar:vertical {
+    background: #F5F5F5;
+    width: 14px;
+    margin: 0;
+    border: none;
+    border-left: 1px solid #CCCCCC;
+}
+QScrollBar::handle:vertical {
+    background: #AAAAAA;
+    min-height: 20px;
+    border-radius: 3px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #888888;
+}
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    width: 0;
+    height: 0;
+}
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+}
+"""
+
+_SCROLLBAR_VERT_STYLE_DARK = """
+QScrollBar:vertical {
+    background: #1E1E1E;
+    width: 14px;
+    margin: 0;
+    border: none;
+    border-left: 1px solid #444444;
+}
+QScrollBar::handle:vertical {
+    background: #555555;
+    min-height: 20px;
+    border-radius: 3px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #777777;
+}
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    width: 0;
+    height: 0;
+}
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+}
+"""
+
+
+@dataclass
+class TrackState:
+    index: int
+    label: str
+    offset_s: float
+    duration_s: float
+    locked: bool = False
+
+    @property
+    def color(self) -> QColor:
+        if self.locked:
+            return LOCKED_TRACK_COLOR
+        return TRACK_COLORS[self.index % len(TRACK_COLORS)]
+
+    @property
+    def end_s(self) -> float:
+        return self.offset_s + self.duration_s
+
+
+class TimelineWidget(QWidget):
+    playhead_changed = Signal(float)  # user seek in global seconds
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setMinimumHeight(HEADER_H + TRACK_H + TRACK_PAD * 2 + SCROLLBAR_H + 20)
+
+        self._tracks: list[TrackState] = []
+        self._playhead_s: float = 0.0
+        self._zoom: float = 100.0   # px per second
+        self._scroll_x: float = _SCROLL_MARGIN  # pixel x of time=0
+        self._scroll_y: float = 0.0  # vertical scroll offset in pixels
+
+        self._drag_mode: str | None = None
+        self._drag_start_x: float = 0.0
+        self._drag_start_value: float = 0.0
+
+        self._hscroll = QScrollBar(Qt.Orientation.Horizontal, self)
+        self._hscroll.setStyleSheet(self._scrollbar_style())
+        self._hscroll.setFixedHeight(SCROLLBAR_H)
+        self._hscroll.setSingleStep(10)
+        self._hscroll.valueChanged.connect(self._on_scrollbar_changed)
+
+        self._vscroll = QScrollBar(Qt.Orientation.Vertical, self)
+        self._vscroll.setStyleSheet(self._vscrollbar_style())
+        self._vscroll.setFixedWidth(SCROLLBAR_W)
+        self._vscroll.setSingleStep(max(1, TRACK_H // 2))
+        self._vscroll.setVisible(False)
+        self._vscroll.valueChanged.connect(self._on_vscrollbar_changed)
+
+    def _is_dark(self) -> bool:
+        return self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+    def _theme(self) -> dict:
+        return _THEME_DARK if self._is_dark() else _THEME_LIGHT
+
+    def _scrollbar_style(self) -> str:
+        return _SCROLLBAR_STYLE_DARK if self._is_dark() else _SCROLLBAR_STYLE_LIGHT
+
+    def _vscrollbar_style(self) -> str:
+        return _SCROLLBAR_VERT_STYLE_DARK if self._is_dark() else _SCROLLBAR_VERT_STYLE_LIGHT
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._hscroll.setStyleSheet(self._scrollbar_style())
+        self._vscroll.setStyleSheet(self._vscrollbar_style())
+        self.update()
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self._hscroll.setStyleSheet(self._scrollbar_style())
+            self._vscroll.setStyleSheet(self._vscrollbar_style())
+            self.update()
+
+    # ----------------------------------------------------------------- layout helpers
+
+    def _content_w(self) -> int:
+        return self.width() - (SCROLLBAR_W if self._vscroll.isVisible() else 0)
+
+    def _track_area_h(self) -> int:
+        return self.height() - SCROLLBAR_H - HEADER_H
+
+    def _tracks_content_h(self) -> int:
+        n = len(self._tracks)
+        return TRACK_PAD + n * (TRACK_H + TRACK_PAD)
+
+    def _needs_vscroll(self) -> bool:
+        return self._tracks_content_h() > self._track_area_h()
+
+    # ----------------------------------------------------------------- track management
+
+    def set_tracks(self, tracks: list[TrackState]) -> None:
+        self._tracks = tracks
+        self._playhead_s = 0.0
+        self._update_vscrollbar()
+        self._fit_zoom()
+        self.update()
+
+    def set_playhead(self, global_s: float) -> None:
+        self._playhead_s = global_s
+        self.update()
+
+    def get_offsets(self) -> list[float]:
+        return [t.offset_s for t in self._tracks]
+
+    # ------------------------------------------------------------------ paint
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        t = self._theme()
+        w = self._content_w()
+        h = self.height() - SCROLLBAR_H  # don't paint over the scrollbar
+
+        track_area_h = h - HEADER_H
+
+        painter.fillRect(0, HEADER_H, w, track_area_h, t["track_area_bg"])
+        painter.fillRect(0, 0, w, HEADER_H, t["ruler_bg"])
+        painter.setPen(QPen(t["ruler_border"], 1))
+        painter.drawLine(0, HEADER_H, w, HEADER_H)
+
+        self._draw_ruler(painter, w, t)
+
+        # Clip track area so scrolled tracks don't overdraw the ruler or scrollbar.
+        painter.save()
+        painter.setClipRect(0, HEADER_H, w, track_area_h)
+        self._draw_tracks(painter, w, track_area_h)
+        painter.restore()
+
+        self._paint_extras(painter, w, h, t)
+        self._draw_playhead(painter, h)
+
+        painter.end()
+
+    def _paint_extras(self, painter: QPainter, w: int, h: int, t: dict) -> None:
+        """Hook for subclasses to paint additional overlays before the playhead."""
+
+    def _draw_ruler(self, painter: QPainter, w: int, t: dict) -> None:
+        font = QFont()
+        font.setPixelSize(10)
+        painter.setFont(font)
+
+        interval = self._tick_interval()
+        total = self._total_duration()
+        ts = 0.0
+        while ts <= total + interval:
+            x = self._s_to_x(ts)
+            if 0 <= x <= w:
+                painter.setPen(QPen(t["ruler_tick"], 1))
+                painter.drawLine(int(x), HEADER_H - 8, int(x), HEADER_H)
+                painter.setPen(QPen(t["ruler_text"], 1))
+                label = self._format_time(ts)
+                painter.drawText(int(x) + 2, HEADER_H - 10, label)
+            ts += interval
+
+    def _draw_lock_icon(self, painter: QPainter, cx: float, cy: float, size: float) -> None:
+        """Draw a simple padlock centred at (cx, cy) using the given pixel size."""
+        painter.save()
+
+        bw = size * 0.72
+        bh = size * 0.52
+        bx = cx - bw / 2
+        by = cy - bh / 2 + size * 0.10
+        body = QRectF(bx, by, bw, bh)
+
+        sw = size * 0.42
+        sh = size * 0.46
+        sx = cx - sw / 2
+        sy = cy - sh / 2 - size * 0.18
+        shackle = QRectF(sx, sy, sw, sh)
+
+        pen = QPen(QColor("white"), max(1.2, size * 0.14))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(shackle, 0 * 16, 180 * 16)
+
+        painter.setBrush(QBrush(QColor("white")))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(body, 2, 2)
+
+        painter.restore()
+
+    def _draw_tracks(self, painter: QPainter, w: int, track_area_h: int) -> None:
+        for i, track in enumerate(self._tracks):
+            rect = self._track_rect(track)
+
+            if rect.bottom() < HEADER_H or rect.top() > HEADER_H + track_area_h:
+                continue
+            if rect.right() < 0 or rect.left() > w:
+                continue
+
+            color = track.color
+            painter.fillRect(rect, color)
+
+            darker = color.darker(140)
+            painter.setPen(QPen(darker, 1))
+            painter.drawRect(rect)
+
+            text_x = rect.left() + 4
+            label_rect = QRectF(text_x, rect.top(), rect.width() - 8, rect.height())
+            painter.setPen(QPen(QColor("white"), 1))
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, track.label)
+
+            if track.locked:
+                fm = QFontMetricsF(painter.font())
+                text_w = fm.horizontalAdvance(track.label)
+                icon_size = TRACK_H * 0.38
+                icon_gap = 5.0
+                icon_cx = text_x + text_w + icon_gap + icon_size * 0.5
+                icon_cy = rect.center().y()
+                self._draw_lock_icon(painter, icon_cx, icon_cy, icon_size)
+
+    def _draw_playhead(self, painter: QPainter, h: int) -> None:
+        x = self._s_to_x(self._playhead_s)
+        pen = QPen(PLAYHEAD_COLOR, 2)
+        painter.setPen(pen)
+        painter.drawLine(int(x), 0, int(x), h)
+
+        tri_size = 8
+        path = QPainterPath()
+        path.moveTo(x - tri_size / 2, 0)
+        path.lineTo(x + tri_size / 2, 0)
+        path.lineTo(x, tri_size)
+        path.closeSubpath()
+        painter.setBrush(QBrush(PLAYHEAD_COLOR))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPath(path)
+
+    # ---------------------------------------------------------- mouse events
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        x = float(event.position().x())
+        t = self._x_to_s(x)
+
+        self._drag_mode = "playhead"
+        self._playhead_s = max(0.0, t)
+        self.playhead_changed.emit(self._playhead_s)
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_mode is None:
+            return
+
+        x = float(event.position().x())
+
+        if self._drag_mode == "playhead":
+            t = self._x_to_s(x)
+            self._playhead_s = max(0.0, t)
+            self.playhead_changed.emit(self._playhead_s)
+
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_mode = None
+
+    def wheelEvent(self, event) -> None:
+        x = float(event.position().x())
+        t_at_cursor = self._x_to_s(x)
+        delta = event.angleDelta().y()
+
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            factor = 1.15 if delta > 0 else 1.0 / 1.15
+            new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, self._zoom * factor))
+            self._scroll_x = x - t_at_cursor * new_zoom
+            self._zoom = new_zoom
+        else:
+            self._scroll_x += delta * 0.5
+
+        self._update_scrollbar()
+        self.update()
+
+    # ---------------------------------------------------------------- helpers
+
+    def _s_to_x(self, seconds: float) -> float:
+        return self._scroll_x + seconds * self._zoom
+
+    def _x_to_s(self, x: float) -> float:
+        return (x - self._scroll_x) / self._zoom
+
+    def _track_rect(self, track: TrackState) -> QRectF:
+        i = track.index
+        y = HEADER_H + TRACK_PAD + i * (TRACK_H + TRACK_PAD) - self._scroll_y
+        x = self._s_to_x(track.offset_s)
+        w = track.duration_s * self._zoom
+        return QRectF(x, y, w, TRACK_H)
+
+    def _total_duration(self) -> float:
+        if not self._tracks:
+            return 10.0
+        return max(t.end_s for t in self._tracks)
+
+    def _fit_zoom(self) -> None:
+        total = self._total_duration()
+        available = max(1, self._content_w() - _SCROLL_MARGIN * 2)
+        self._zoom = max(MIN_ZOOM, min(MAX_ZOOM, available / total))
+        self._scroll_x = float(_SCROLL_MARGIN)
+        self._update_scrollbar()
+
+    def _update_scrollbar(self) -> None:
+        if self.width() == 0:
+            return
+        total_px = int(self._total_duration() * self._zoom)
+        viewport_w = self._content_w()
+        max_val = max(0, total_px + _SCROLL_MARGIN * 2 - viewport_w)
+        current = max(0, int(_SCROLL_MARGIN - self._scroll_x))
+        self._hscroll.blockSignals(True)
+        self._hscroll.setRange(0, max_val)
+        self._hscroll.setPageStep(viewport_w)
+        self._hscroll.setSingleStep(max(1, int(self._zoom * 0.1)))
+        self._hscroll.setValue(min(current, max_val))
+        self._hscroll.blockSignals(False)
+
+    def _update_vscrollbar(self) -> None:
+        needs = self._needs_vscroll()
+        self._vscroll.setVisible(needs)
+        if needs:
+            track_area_h = self._track_area_h()
+            content_h = self._tracks_content_h()
+            max_val = max(0, content_h - track_area_h)
+            self._scroll_y = min(self._scroll_y, float(max_val))
+            self._vscroll.blockSignals(True)
+            self._vscroll.setRange(0, max_val)
+            self._vscroll.setPageStep(track_area_h)
+            self._vscroll.setSingleStep(max(1, TRACK_H // 2))
+            self._vscroll.setValue(int(self._scroll_y))
+            self._vscroll.blockSignals(False)
+        else:
+            self._scroll_y = 0.0
+
+    def _on_scrollbar_changed(self, value: int) -> None:
+        self._scroll_x = float(_SCROLL_MARGIN - value)
+        self.update()
+
+    def _on_vscrollbar_changed(self, value: int) -> None:
+        self._scroll_y = float(value)
+        self.update()
+
+    def _tick_interval(self) -> float:
+        candidates = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]
+        min_px = 60.0
+        for c in candidates:
+            if c * self._zoom >= min_px:
+                return c
+        return candidates[-1]
+
+    def _format_time(self, s: float) -> str:
+        m = int(s) // 60
+        sec = s - m * 60
+        return f"{m}:{sec:05.2f}"
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        w = self.width()
+        h = self.height()
+        self._update_vscrollbar()
+        cw = self._content_w()
+        self._hscroll.setGeometry(0, h - SCROLLBAR_H, cw, SCROLLBAR_H)
+        if self._vscroll.isVisible():
+            track_area_h = self._track_area_h()
+            self._vscroll.setGeometry(cw, HEADER_H, SCROLLBAR_W, track_area_h)
+        if self._tracks:
+            self._fit_zoom()
+        else:
+            self._update_scrollbar()
+
+
+class SyncTrimTimelineWidget(TimelineWidget):
+    """TimelineWidget extended with trim handles and per-track offset editing."""
+
+    offsets_changed = Signal(list)       # list[float]
+    trim_changed = Signal(float, float)  # trim_start, trim_end
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._trim_start_s: float = 0.0
+        self._trim_end_s: float = 0.0
+
+    # ----------------------------------------------------------------- track management
+
+    def set_tracks(self, tracks: list[TrackState]) -> None:
+        super().set_tracks(tracks)
+        total = max((t.end_s for t in tracks), default=10.0)
+        shared_start = max((t.offset_s for t in tracks), default=0.0)
+        shared_end   = min((t.end_s   for t in tracks), default=total)
+        if shared_start < shared_end:
+            self._trim_start_s = shared_start
+            self._trim_end_s   = shared_end
+        else:
+            self._trim_start_s = 0.0
+            self._trim_end_s   = total
+        self._playhead_s = self._trim_start_s
+        self.update()
+
+    def get_trim(self) -> tuple[float, float]:
+        return self._trim_start_s, self._trim_end_s
+
+    # ------------------------------------------------------------------ paint
+
+    def _paint_extras(self, painter: QPainter, w: int, h: int, t: dict) -> None:
+        self._draw_trim_overlay(painter, w, h, t)
+        self._draw_trim_handles(painter, h, t)
+
+    def _draw_trim_overlay(self, painter: QPainter, w: int, h: int, t: dict) -> None:
+        trim_start_x = int(self._s_to_x(self._trim_start_s))
+        trim_end_x = int(self._s_to_x(self._trim_end_s))
+
+        if trim_start_x > 0:
+            painter.fillRect(0, HEADER_H, trim_start_x, h - HEADER_H, t["trim_overlay"])
+        if trim_end_x < w:
+            painter.fillRect(trim_end_x, HEADER_H, w - trim_end_x, h - HEADER_H, t["trim_overlay"])
+
+    def _draw_trim_handles(self, painter: QPainter, h: int, t: dict) -> None:
+        handle_color = t["handle"]
+        for t_s, side in ((self._trim_start_s, "start"), (self._trim_end_s, "end")):
+            x = self._s_to_x(t_s)
+            painter.setPen(QPen(handle_color, 2))
+            painter.drawLine(int(x), HEADER_H, int(x), h)
+
+            grab_w = 12
+            grab_h = 20
+            if side == "start":
+                grab_rect = QRectF(x, HEADER_H, grab_w, grab_h)
+            else:
+                grab_rect = QRectF(x - grab_w, HEADER_H, grab_w, grab_h)
+
+            painter.setBrush(QBrush(handle_color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(grab_rect, 3, 3)
+
+    # ---------------------------------------------------------- mouse events
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        x = float(event.position().x())
+
+        if abs(x - self._s_to_x(self._trim_start_s)) <= HANDLE_W:
+            self._drag_mode = "trim_start"
+            self._drag_start_x = x
+            self._drag_start_value = self._trim_start_s
+            return
+
+        if abs(x - self._s_to_x(self._trim_end_s)) <= HANDLE_W:
+            self._drag_mode = "trim_end"
+            self._drag_start_x = x
+            self._drag_start_value = self._trim_end_s
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_mode not in ("trim_start", "trim_end"):
+            super().mouseMoveEvent(event)
+            return
+
+        x = float(event.position().x())
+        delta_s = (x - self._drag_start_x) / self._zoom
+
+        if self._drag_mode == "trim_start":
+            new_val = max(0.0, min(self._trim_end_s - 0.001, self._drag_start_value + delta_s))
+            self._trim_start_s = new_val
+            self.trim_changed.emit(self._trim_start_s, self._trim_end_s)
+
+        elif self._drag_mode == "trim_end":
+            total = self._total_duration()
+            new_val = max(self._trim_start_s + 0.001, min(total, self._drag_start_value + delta_s))
+            self._trim_end_s = new_val
+            self.trim_changed.emit(self._trim_start_s, self._trim_end_s)
+
+        self.update()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        x = float(event.position().x())
+        y = float(event.position().y())
+        for track in self._tracks:
+            if track.locked:
+                continue
+            rect = self._track_rect(track)
+            if rect.contains(QPointF(x, y)):
+                value, ok = QInputDialog.getDouble(
+                    self,
+                    "Set Offset",
+                    f"Offset for '{track.label}' (seconds):",
+                    track.offset_s,
+                    -100000.0,
+                    100000.0,
+                    3,
+                )
+                if ok:
+                    track.offset_s = value
+                    self._clamp_trim_to_tracks()
+                    self.offsets_changed.emit(self.get_offsets())
+                    self._update_scrollbar()
+                    self.update()
+                return
+
+    # ---------------------------------------------------------------- helpers
+
+    def _clamp_trim_to_tracks(self) -> None:
+        total = self._total_duration()
+        self._trim_end_s = min(self._trim_end_s, total)
+        self._trim_start_s = min(self._trim_start_s, self._trim_end_s - 0.001)
+        self._trim_start_s = max(0.0, self._trim_start_s)
+
+
+class RulerTimeline(TimelineWidget):
+    """Ruler + playhead only — no track bars, no vertical scrollbar."""
+
+    def __init__(self, duration_s: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._duration_s = duration_s
+        self.setMinimumHeight(HEADER_H + SCROLLBAR_H)
+        self._fit_zoom()
+
+    def set_duration(self, duration_s: float) -> None:
+        self._duration_s = duration_s
+        self._fit_zoom()
+        self.update()
+
+    def _total_duration(self) -> float:
+        return self._duration_s
+
+    def _needs_vscroll(self) -> bool:
+        return False
+
+    def _draw_tracks(self, painter, w: int, track_area_h: int) -> None:
+        pass

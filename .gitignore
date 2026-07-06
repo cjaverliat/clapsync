@@ -1,0 +1,41 @@
+# pixi / env
+.pixi/*
+!.pixi/config.toml
+.venv
+env/
+venv/
+ENV/
+
+# editors
+.idea/
+.vscode/
+.claude
+.superpowers
+
+# build
+outputs/
+output/
+build/
+dist/
+*.egg-info/
+src/kineo_sync.egg-info
+
+# python
+**/__pycache__/
+*.py[codz]
+*$py.class
+*.so
+
+# test / cache
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# misc
+*.err
+*.stackdump
+*.bak
+*.log
+
+# pixi lock is committed (reproducible); uncomment to ignore
+# pixi.lock
