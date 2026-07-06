@@ -2,28 +2,30 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Callable
 
 import torch
 
 from clapsync.app.decode import load_audio
-from clapsync.app.media import MediaInfo
+from clapsync.app.media import probe
 from clapsync.core.offsets import Refine, align_waveforms
 
 logger = logging.getLogger(__name__)
 
 
 def compute_sync_offsets(
-    media: list[MediaInfo],
+    paths: list[Path],
+    *,
     reference_index: int = 0,
     refine: Refine = "parabolic",
     progress: Callable[[float], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> list[float]:
-    """Align probed tracks by loading their audio and cross-correlating.
+    """Probe, load audio, and align paths by MFCC cross-correlation.
 
     Args:
-        media: Probed tracks; each must have an audio stream.
+        paths: Input media file paths.
         reference_index: Track whose timeline is the origin.
         refine: Peak refinement.
         progress: Optional 0..1 callback.
@@ -31,7 +33,11 @@ def compute_sync_offsets(
 
     Returns:
         Per-track offset in seconds; offset[reference_index] == 0.0.
+
+    Raises:
+        ValueError: If any input has no audio stream.
     """
+    media = [probe(p) for p in paths]
     missing = [str(m.path) for m in media if not m.has_audio]
     if missing:
         raise ValueError(

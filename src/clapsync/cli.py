@@ -17,9 +17,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
-    media = [probe(p) for p in args.inputs]
     offsets = compute_sync_offsets(
-        media,
+        args.inputs,
         reference_index=args.reference,
         refine=args.refine,
         progress=lambda f: print(
@@ -27,11 +26,11 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         ),
     )
     print(file=sys.stderr)
-    durations = [m.duration for m in media]
+    durations = [probe(p).duration for p in args.inputs]
     common = common_time_range(durations, offsets)
     full = full_time_range(durations, offsets)
-    for info, off in zip(media, offsets):
-        print(f"{info.path.name}\toffset={off:+.4f}s")
+    for path, off in zip(args.inputs, offsets):
+        print(f"{path.name}\toffset={off:+.4f}s")
     print(
         f"common range: {common.start:.4f}..{common.end:.4f}s"
         f" ({common.duration:.4f}s)"

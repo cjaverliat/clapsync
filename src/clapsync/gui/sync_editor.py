@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
 
 from framepipe import VideoInfo, get_video_info, get_display_size
 from clapsync.app import ExportResult, ExportSettings
-from clapsync.app.media import probe
 from clapsync.core import TimeRange
 from clapsync.gui.export_dialog import ExportDialog
 from clapsync.gui.video_player import VideoPlayerWidget, PlaybackClock, VideoGroupWorker
@@ -448,7 +447,7 @@ class SyncEditorWindow(QMainWindow):
         progress_dialog.setValue(0)
         progress_dialog.show()
 
-        media = [probe(info.path) for info in self._video_infos]
+        paths = [info.path for info in self._video_infos]
         settings = ExportSettings(
             trim=TimeRange(self._trim_start, self._trim_end),
             output_dir=output_dir,
@@ -456,7 +455,7 @@ class SyncEditorWindow(QMainWindow):
             target_height=target_height,
             output_fps=output_fps,
         )
-        worker = ExportWorker(media, self._offsets, settings)
+        worker = ExportWorker(paths, self._offsets, settings)
         thread = QThread(self)
         worker.moveToThread(thread)
 

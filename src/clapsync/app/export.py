@@ -12,7 +12,7 @@ import torch
 
 from clapsync.app.decode import decode_frames_at, load_audio
 from clapsync.app.encode import encode_clip
-from clapsync.app.media import MediaInfo, probe
+from clapsync.app.media import probe
 from clapsync.app.sync import compute_sync_offsets
 from clapsync.core.offsets import Refine
 from clapsync.core.timerange import TimeRange, common_time_range, full_time_range
@@ -197,7 +197,7 @@ def _build_audio_samples(
 
 
 def export_tracks(
-    media: list[MediaInfo],
+    paths: list[Path],
     offsets: list[float],
     settings: ExportSettings,
     progress: Callable[[float], None] | None = None,
@@ -209,7 +209,7 @@ def export_tracks(
     file. Video and audio share the exact subframe trim origin.
 
     Args:
-        media: Probed tracks.
+        paths: Input media file paths.
         offsets: Per-track shared-timeline offsets (seconds).
         settings: Output resolution/fps/codec/dir.
         progress: Optional 0..1 callback.
@@ -218,6 +218,7 @@ def export_tracks(
     Returns:
         One ExportResult per track (in input order).
     """
+    media = [probe(p) for p in paths]
     device = "cuda" if _nvenc_available() else "cpu"
     trim = settings.trim
     results: list[ExportResult] = []
@@ -311,21 +312,19 @@ def sync_and_trim(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    media = [probe(p) for p in paths]
-
     def sync_progress(f: float) -> None:
         if progress is not None:
             progress(0.5 * f)
 
     offsets = compute_sync_offsets(
-        media,
+        paths,
         reference_index=reference_index,
         refine=refine,
         progress=sync_progress,
         is_cancelled=is_cancelled,
     )
 
-    durations = [m.duration for m in media]
+    durations = [probe(p).duration for p in paths]
     rng = (common_time_range if trim == "common" else full_time_range)(
         durations, offsets,
     )
@@ -336,6 +335,6 @@ def sync_and_trim(
             progress(0.5 + 0.5 * f)
 
     return export_tracks(
-        media, offsets, settings,
+        paths, offsets, settings,
         progress=export_progress, is_cancelled=is_cancelled,
     )
