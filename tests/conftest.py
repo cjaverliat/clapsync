@@ -49,3 +49,28 @@ def rgb_video(tmp_path: Path):
         return path, fps, n, w, h
 
     return _make
+
+
+@pytest.fixture
+def av_video(tmp_path: Path):
+    """Factory: write a muxed audio+video file, return (path, fps, n, w, h, sr)."""
+    from torchcodec.encoders import Encoder
+
+    def _make(seconds: float = 1.0, fps: float = 30.0, w: int = 64, h: int = 48,
+              sample_rate: int = 48000, freq: float = 440.0, name: str = "av.mp4"):
+        path = tmp_path / name
+        n = int(seconds * fps)
+        frames = torch.zeros((n, 3, h, w), dtype=torch.uint8)
+        frames[:, 2] = 200  # solid blue
+        samples = _tone(seconds, sample_rate, freq)
+        encoder = Encoder()
+        vstream = encoder.add_video(
+            height=h, width=w, frame_rate=fps, device="cpu", codec="libx264",
+        )
+        astream = encoder.add_audio(sample_rate=sample_rate, num_channels=1)
+        with encoder.open_file(str(path)):
+            vstream.add_frames(frames)
+            astream.add_samples(samples)
+        return path, fps, n, w, h, sample_rate
+
+    return _make

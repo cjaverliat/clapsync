@@ -31,7 +31,9 @@ def _nvenc_available() -> bool:
     """
     if not torch.cuda.is_available():
         return False
-    frames = torch.zeros((2, 3, 16, 16), dtype=torch.uint8)
+    # Probe at a realistic size: NVENC rejects tiny frames (min ~256x144), so a
+    # 16x16 probe would false-negative on machines where NVENC actually works.
+    frames = torch.zeros((2, 3, 144, 256), dtype=torch.uint8)
     try:
         with tempfile.TemporaryDirectory() as tmp:
             encode_clip(
@@ -238,11 +240,26 @@ def export_tracks(
                     audio, rate = _build_audio_samples(info, offset, trim)
                 ext = "mp4"
                 out_path = settings.output_dir / f"{info.path.stem}_synced.{ext}"
-                encode_clip(
-                    out_path, frames, out_fps, audio, rate,
-                    video_codec=settings.video_codec, crf=settings.crf,
-                    device=device,
-                )
+                try:
+                    encode_clip(
+                        out_path, frames, out_fps, audio, rate,
+                        video_codec=settings.video_codec, crf=settings.crf,
+                        device=device,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # NVENC can still reject an individual clip (e.g. below its
+                    # minimum resolution). Fall back to CPU libx264 for this
+                    # clip unless the caller pinned a specific codec.
+                    if device != "cuda" or settings.video_codec is not None:
+                        raise
+                    logger.warning(
+                        "GPU encode failed for %s (%s) — retrying on CPU",
+                        info.path, exc,
+                    )
+                    encode_clip(
+                        out_path, frames, out_fps, audio, rate,
+                        video_codec="libx264", crf=settings.crf, device="cpu",
+                    )
             else:
                 audio, rate = _build_audio_samples(info, offset, trim)
                 ext = (
