@@ -3,7 +3,17 @@ name = "clapsync"
 version = "0.1.0"
 description = "Multi-camera audio-based synchronization and trimming tool"
 requires-python = ">=3.10,<3.13"
-dependencies = []
+# Abstract runtime deps for consumers. torchcodec >=0.13 provides the
+# multi-stream Encoder (muxed A/V); it requires torch 2.11. No CUDA/index is
+# pinned here on purpose — the consuming project installs torch + torchcodec
+# from the appropriate CUDA wheel index (they must share a CUDA build). This
+# workspace's own cu130 pins live in [tool.pixi.pypi-dependencies] for dev.
+dependencies = [
+    "numpy",
+    "torch>=2.11",
+    "torchaudio>=2.11",
+    "torchcodec>=0.13",
+]
 
 [project.scripts]
 clapsync = "clapsync.app:main"

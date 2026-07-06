@@ -969,7 +969,12 @@ packages:
 - pypi: ./
   name: clapsync
   version: 0.1.0
-  sha256: 999940cd4bcb8aacefa6722ef406327b24c01f68984cde6d9eb958986901c21d
+  sha256: b9ecd27f1769c997931dd106f47d52ddb4c1d884b7a18957bf32493a8e15d2d2
+  requires_dist:
+  - numpy
+  - torch>=2.11
+  - torchaudio>=2.11
+  - torchcodec>=0.13
   requires_python: '>=3.10,<3.13'
   editable: true
 - pypi: https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl
