@@ -42,6 +42,8 @@ def test_find_offset_none_refine_is_integer_hop():
     sub = _click_track(n, click_at=sr + int(0.20 * sr))
     lag_none = find_offset(ref, sr, sub, sr, refine="none")
     lag_par = find_offset(ref, sr, sub, sr, refine="parabolic")
+    # Independently pin correctness: integer-hop lag lands on -0.20 s.
+    assert abs(lag_none - (-0.20)) < 0.01
     # Both near -0.20 s; parabolic within 5 ms of none
     # (for exact-grid lags, integer argmax is already exact, so parabolic may
     # introduce a tiny Hann-window asymmetry; 5 ms tolerance covers that).
