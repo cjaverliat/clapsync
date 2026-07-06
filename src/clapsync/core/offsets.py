@@ -9,6 +9,7 @@ from torchaudio.transforms import MFCC
 logger = logging.getLogger(__name__)
 
 Method = Literal["mfcc", "envelope"]
+Refine = Literal["none", "parabolic"]
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +26,29 @@ def _to_mono_f64(waveform: torch.Tensor) -> np.ndarray:
     if waveform.ndim > 1:
         waveform = waveform.mean(dim=0) if waveform.shape[0] > 1 else waveform.squeeze(0)
     return waveform.to(torch.float64).cpu().numpy()
+
+
+def _parabolic_peak(corr: np.ndarray, peak: int) -> float:
+    """Refine an integer correlation peak to sub-sample precision.
+
+    Fits a parabola through corr[peak-1:peak+2] and returns the fractional
+    index of its vertex. Clamps to the integer peak at array edges or when the
+    three points are colinear.
+
+    Args:
+        corr: 1D correlation array.
+        peak: Index of the integer-grid maximum.
+
+    Returns:
+        Fractional peak index in [peak-0.5, peak+0.5].
+    """
+    if peak <= 0 or peak >= len(corr) - 1:
+        return float(peak)
+    y0, y1, y2 = float(corr[peak - 1]), float(corr[peak]), float(corr[peak + 1])
+    denom = y0 - 2.0 * y1 + y2
+    if denom == 0.0:
+        return float(peak)
+    return peak + 0.5 * (y0 - y2) / denom
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +144,7 @@ def find_offset_envelope(
     waveform: torch.Tensor,
     rate: int,
     fps: float,
+    refine: Refine = "parabolic",
 ) -> tuple[int, float]:
     """
     Find the temporal offset between two audio waveforms using per-frame L1
@@ -140,10 +165,14 @@ def find_offset_envelope(
         waveform:     Audio to align, shape (channels, samples) or (samples,).
         rate:         Sample rate of waveform in Hz. Resampled to ref_rate if needed.
         fps:          Reference clip's video frame rate in Hz (e.g. 25.0, 29.97, 30.0).
+        refine:       Peak refinement strategy. "parabolic" interpolates the
+                      correlation peak to sub-frame precision; "none" uses the
+                      raw integer argmax.
 
     Returns:
-        (lag_frames, lag_seconds): signed lag. Positive means waveform starts
-        after ref_waveform and should be delayed by that many frames to align.
+        (lag_frames, lag_seconds): signed lag. Positive means waveform leads
+        (starts before) ref_waveform; negative means it starts later. Used as
+        offset with the export convention shared_time = local_time + offset.
     """
     if ref_rate != rate:
         waveform = AF.resample(waveform, orig_freq=rate, new_freq=ref_rate)
@@ -151,12 +180,17 @@ def find_offset_envelope(
     env_ref = _build_envelope(_to_mono_f64(ref_waveform), ref_rate, fps)
     env_sub = _build_envelope(_to_mono_f64(waveform),     ref_rate, fps)
 
-    corr     = _fft_correlate(main=env_ref, sub=env_sub)
+    corr = _fft_correlate(main=env_ref, sub=env_sub)
     peak_idx = int(np.argmax(corr))
+    peak = _parabolic_peak(corr, peak_idx) if refine == "parabolic" else float(peak_idx)
 
-    # Zero-lag is at index len(env_sub) due to the prepended zero in _fft_correlate
-    lag_frames  = peak_idx - len(env_sub)
-    lag_seconds = lag_frames / fps
+    # Zero-lag is at index len(env_sub) due to the prepended zero in
+    # _fft_correlate. Sign convention (matches export clip_window, where
+    # shared = local + offset): positive lag = query leads the reference,
+    # negative = query is delayed/later.
+    lag_frac = peak - len(env_sub)
+    lag_seconds = lag_frac / fps
+    lag_frames = round(lag_frac)
 
     logger.debug(
         "[envelope] sizes: ref=%d sub=%d  corr_size=%d  peak=%d  lag=%+d frames (%+.3f s)",
@@ -265,6 +299,7 @@ def find_offset_mfcc(
     waveform: torch.Tensor,
     rate: int,
     fps: float,
+    refine: Refine = "parabolic",
     n_mfcc: int = 13,
     n_fft: int = 2048,
     hop_duration: float = 0.005,   # 5 ms -> ~8x finer than a 25 fps frame
@@ -293,6 +328,9 @@ def find_offset_mfcc(
         fps:          Reference clip's video frame rate in Hz (e.g. 25.0, 29.97, 30.0).
                       Used only to convert the sub-frame-accurate lag in seconds to
                       the nearest integer frame count.
+        refine:       Peak refinement strategy. "parabolic" interpolates the
+                      correlation peak to sub-hop precision; "none" uses the
+                      raw integer argmax.
         n_mfcc:       Number of MFCC coefficients.
         n_fft:        FFT size for the mel spectrogram.
         hop_duration: MFCC hop size in seconds. Controls time resolution of the
@@ -303,7 +341,7 @@ def find_offset_mfcc(
 
     Returns:
         (lag_frames, lag_seconds): signed lag at video-frame and sub-frame resolution.
-        Positive means waveform starts after ref_waveform.
+        Positive means waveform leads (starts before) ref_waveform.
     """
     if ref_rate != rate:
         waveform = AF.resample(waveform, orig_freq=rate, new_freq=ref_rate)
@@ -318,17 +356,20 @@ def find_offset_mfcc(
     mfcc_ref = _compute_mfcc(ref_mono, ref_rate, n_mfcc, n_fft, hop_length, win_length, n_mels, mel_scale)
     mfcc_sub = _compute_mfcc(sub_mono, ref_rate, n_mfcc, n_fft, hop_length, win_length, n_mels, mel_scale)
 
-    corr     = _mfcc_cross_correlate(mfcc_ref, mfcc_sub)
+    corr = _mfcc_cross_correlate(mfcc_ref, mfcc_sub)
     peak_idx = int(np.argmax(corr))
+    peak = _parabolic_peak(corr, peak_idx) if refine == "parabolic" else float(peak_idx)
 
-    # Zero-lag is at index T_sub - 1 (see _mfcc_cross_correlate docstring)
-    lag_hops    = peak_idx - (mfcc_sub.shape[1] - 1)
+    # Zero-lag is at index T_sub - 1 (see _mfcc_cross_correlate). Sign
+    # convention matches find_offset_envelope / export clip_window: positive
+    # lag = query leads the reference, negative = query is delayed/later.
+    lag_hops = peak - (mfcc_sub.shape[1] - 1)
     lag_seconds = lag_hops * hop_length / ref_rate
-    lag_frames  = round(lag_seconds * fps)
+    lag_frames = round(lag_seconds * fps)
 
     logger.debug(
         "[mfcc] sizes: ref=%d sub=%d hops  corr_size=%d  peak=%d  "
-        "lag=%+d hops (%+.3f s, %+d frames @ %.4f fps)",
+        "lag=%+.3f hops (%+.3f s, %+d frames @ %.4f fps)",
         mfcc_ref.shape[1], mfcc_sub.shape[1], len(corr), peak_idx,
         lag_hops, lag_seconds, lag_frames, fps,
     )
@@ -347,6 +388,7 @@ def find_offset(
     rate: int,
     fps: float,
     method: Method = "mfcc",
+    refine: Refine = "parabolic",
     # MFCC-only params (ignored when method="envelope")
     n_mfcc: int = 13,
     n_fft: int = 2048,
@@ -370,6 +412,9 @@ def find_offset(
         fps:          Reference clip's video frame rate in Hz (e.g. 25.0, 29.97, 30.0).
         method:       "mfcc" (default) or "envelope". See find_offset_mfcc and
                       find_offset_envelope for a full comparison of tradeoffs.
+        refine:       Peak refinement strategy. "parabolic" interpolates the
+                      correlation peak to sub-hop/sub-frame precision; "none"
+                      uses the raw integer argmax.
         n_mfcc:       [mfcc] Number of MFCC coefficients.
         n_fft:        [mfcc] FFT size for the mel spectrogram.
         hop_duration: [mfcc] Hop size in seconds (time resolution of correlation).
@@ -378,8 +423,9 @@ def find_offset(
         mel_scale:    [mfcc] Mel scale type ("htk" or "slaney").
 
     Returns:
-        (lag_frames, lag_seconds): signed lag. Positive means waveform starts
-        after ref_waveform and should be delayed by that many frames to align.
+        (lag_frames, lag_seconds): signed lag. Positive means waveform leads
+        (starts before) ref_waveform; negative means it starts later. Used as
+        offset with the export convention shared_time = local_time + offset.
 
     Raises:
         ValueError: If *method* is not "mfcc" or "envelope".
@@ -387,14 +433,13 @@ def find_offset(
     if method == "mfcc":
         return find_offset_mfcc(
             ref_waveform, ref_rate, waveform, rate, fps,
-            n_mfcc=n_mfcc,
-            n_fft=n_fft,
-            hop_duration=hop_duration,
-            win_duration=win_duration,
-            n_mels=n_mels,
-            mel_scale=mel_scale,
+            refine=refine,
+            n_mfcc=n_mfcc, n_fft=n_fft, hop_duration=hop_duration,
+            win_duration=win_duration, n_mels=n_mels, mel_scale=mel_scale,
         )
     if method == "envelope":
-        return find_offset_envelope(ref_waveform, ref_rate, waveform, rate, fps)
+        return find_offset_envelope(
+            ref_waveform, ref_rate, waveform, rate, fps, refine=refine,
+        )
 
     raise ValueError(f"Unknown method {method!r}. Expected 'mfcc' or 'envelope'.")

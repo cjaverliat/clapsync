@@ -8,9 +8,9 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QDialog
 
+from clapsync.gui.sync_editor import SyncEditorWindow
 from clapsync.gui.video_selection_dialog import VideoSelectionDialog
-from clapsync.offset_worker import compute_offsets_with_progress
-from clapsync.sync_editor import SyncEditorWindow
+from clapsync.gui.workers import compute_offsets_with_progress
 
 logger = logging.getLogger(__name__)
 
