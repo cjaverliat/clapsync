@@ -37,7 +37,18 @@ def compute_sync_offsets(
     n = len(media)
     ref_fps = media[reference_index].fps or 30.0
 
-    ref_wave, ref_rate = load_audio(media[reference_index].path)
+    # Without loadable reference audio there is nothing to align against;
+    # return zero offsets rather than aborting the whole pipeline.
+    try:
+        ref_wave, ref_rate = load_audio(media[reference_index].path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "reference %s has no loadable audio (%s) — offsets all 0.0",
+            media[reference_index].path, exc,
+        )
+        if progress is not None:
+            progress(1.0)
+        return [0.0] * n
 
     lags: list[float] = [0.0] * n
     for i, info in enumerate(media):

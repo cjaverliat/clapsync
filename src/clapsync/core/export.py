@@ -1,7 +1,9 @@
 """Trim/pad export of synced tracks (window math is pure; I/O is separate)."""
 from __future__ import annotations
 
+import functools
 import logging
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -16,6 +18,30 @@ from clapsync.io.decode import decode_frames_at, load_audio
 from clapsync.io.encode import encode_clip
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _nvenc_available() -> bool:
+    """Return True if h264_nvenc can actually encode on this machine.
+
+    CUDA being present is not sufficient — the NVENC path can fail to
+    initialize (driver/SDK/build mismatch). Probe once by encoding a tiny
+    clip to a temp file; cache the verdict for the process. On failure the
+    export falls back to CPU libx264.
+    """
+    if not torch.cuda.is_available():
+        return False
+    frames = torch.zeros((2, 3, 16, 16), dtype=torch.uint8)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            encode_clip(
+                Path(tmp) / "nvenc_probe.mp4",
+                frames, 30.0, None, None, device="cuda",
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001 — any failure means "use CPU"
+        logger.warning("h264_nvenc unavailable (%s) — using CPU libx264", exc)
+        return False
 
 
 @dataclass(frozen=True)
@@ -190,7 +216,7 @@ def export_tracks(
     Returns:
         One ExportResult per track (in input order).
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if _nvenc_available() else "cpu"
     trim = settings.trim
     results: list[ExportResult] = []
     n = len(media)
@@ -276,20 +302,14 @@ def sync_and_trim(
         if progress is not None:
             progress(0.5 * f)
 
-    try:
-        offsets = compute_sync_offsets(
-            media,
-            reference_index=reference_index,
-            method=method,
-            refine=refine,
-            progress=sync_progress,
-            is_cancelled=is_cancelled,
-        )
-    except Exception as exc:
-        logger.warning(
-            "compute_sync_offsets failed (%s) — using zero offsets", exc,
-        )
-        offsets = [0.0] * len(media)
+    offsets = compute_sync_offsets(
+        media,
+        reference_index=reference_index,
+        method=method,
+        refine=refine,
+        progress=sync_progress,
+        is_cancelled=is_cancelled,
+    )
 
     durations = [m.duration for m in media]
     rng = (common_time_range if trim == "common" else full_time_range)(
