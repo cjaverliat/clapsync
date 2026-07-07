@@ -80,7 +80,9 @@ Install with `pip install clapsync` (numpy + torch + torchaudio only).
 | `export_tracks(paths, offsets, settings)` | Trim + export with full control (resolution, fps, codec). |
 | `sync_and_trim(paths, out)` | One-call convenience: probe → sync → trim → export. |
 | `ExportSettings` / `ExportResult` | Configuration and result types for export. |
-| `clapsync.app.media.probe(path)` | Read a clip's metadata (`MediaInfo`: duration, fps, …). |
+
+`probe(path)` (in `clapsync.app.media`) reads a clip's metadata (`MediaInfo`:
+duration, fps, …) — internal, but available if you need it.
 
 Offsets are sub-frame accurate and kept as floating-point seconds end to end, so
 audio and video stay locked even when the true offset falls between frames.

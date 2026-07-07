@@ -1,7 +1,12 @@
 import pytest
 
-from clapsync.app import export_tracks, compute_sync_offsets, ExportSettings
-from clapsync.app.export import sync_and_trim, ExportResult
+from clapsync.app import (
+    ExportResult,
+    ExportSettings,
+    compute_sync_offsets,
+    export_tracks,
+    sync_and_trim,
+)
 from clapsync.app.media import probe
 from clapsync.core import common_time_range
 

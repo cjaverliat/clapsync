@@ -1,10 +1,12 @@
 """Find sync offsets and the common/full time range from audio waveforms.
 
 The caller loads audio (here with torchaudio) and passes tensors to the pure
-core — clapsync.core does no file I/O.
+core — clapsync.core does no file I/O. Pass audio files; torchaudio.load can
+also read a video container's audio track, but that depends on its ffmpeg
+backend, so extract audio first if in doubt.
 
 Usage:
-    pixi run python examples/find_sync.py clip_a.wav clip_b.mp4 clip_c.wav
+    pixi run python examples/find_sync.py clip_a.wav clip_b.wav clip_c.wav
 """
 from __future__ import annotations
 

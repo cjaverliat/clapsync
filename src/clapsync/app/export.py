@@ -12,8 +12,8 @@ import torch
 
 from clapsync.app.decode import decode_frames_at, load_audio
 from clapsync.app.encode import encode_clip
-from clapsync.app.media import probe
-from clapsync.app.sync import compute_sync_offsets
+from clapsync.app.media import MediaInfo, probe
+from clapsync.app.sync import offsets_from_media
 from clapsync.core.offsets import Refine
 from clapsync.core.timerange import TimeRange, common_time_range, full_time_range
 
@@ -141,20 +141,22 @@ def _build_video_frames(
     """
     times = frame_source_times(offset, trim, out_fps)
     in_range = [0.0 <= t < info.duration for t in times]
-    sampled = {}
-    wanted = [t for t, ok in zip(times, in_range) if ok]
-    if wanted:
-        decoded = decode_frames_at(info.path, wanted, device="cpu")
-        for t, frame in zip(wanted, decoded):
-            sampled[t] = frame
+    wanted_idx = [k for k, ok in enumerate(in_range) if ok]
+    decoded_by_idx: dict[int, torch.Tensor] = {}
+    if wanted_idx:
+        decoded = decode_frames_at(
+            info.path, [times[k] for k in wanted_idx], device="cpu",
+        )
+        for k, frame in zip(wanted_idx, decoded):
+            decoded_by_idx[k] = frame
 
     black = torch.zeros((3, out_h, out_w), dtype=torch.uint8)
     frames = []
-    for t, ok in zip(times, in_range):
+    for k, ok in enumerate(in_range):
         if not ok:
             frames.append(black)
             continue
-        frame = sampled[t]
+        frame = decoded_by_idx[k]
         if frame.shape[-1] != out_w or frame.shape[-2] != out_h:
             frame = torch.nn.functional.interpolate(
                 frame.unsqueeze(0).float(),
@@ -196,29 +198,14 @@ def _build_audio_samples(
     return out, rate
 
 
-def export_tracks(
-    paths: list[Path],
+def export_media(
+    media: list[MediaInfo],
     offsets: list[float],
     settings: ExportSettings,
     progress: Callable[[float], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> list[ExportResult]:
-    """Trim+pad every track to settings.trim and encode one file each.
-
-    Video tracks produce a muxed A/V MP4; audio-only tracks produce an audio
-    file. Video and audio share the exact subframe trim origin.
-
-    Args:
-        paths: Input media file paths.
-        offsets: Per-track shared-timeline offsets (seconds).
-        settings: Output resolution/fps/codec/dir.
-        progress: Optional 0..1 callback.
-        is_cancelled: Optional cancel check.
-
-    Returns:
-        One ExportResult per track (in input order).
-    """
-    media = [probe(p) for p in paths]
+    """Encode already-probed tracks (no re-probe); see export_tracks."""
     device = "cuda" if _nvenc_available() else "cpu"
     trim = settings.trim
     results: list[ExportResult] = []
@@ -285,6 +272,34 @@ def export_tracks(
     return results
 
 
+def export_tracks(
+    paths: list[Path],
+    offsets: list[float],
+    settings: ExportSettings,
+    progress: Callable[[float], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> list[ExportResult]:
+    """Trim+pad every track to settings.trim and encode one file each.
+
+    Video tracks produce a muxed A/V MP4; audio-only tracks produce an audio
+    file. Video and audio share the exact subframe trim origin.
+
+    Args:
+        paths: Input media file paths.
+        offsets: Per-track shared-timeline offsets (seconds).
+        settings: Output resolution/fps/codec/dir.
+        progress: Optional 0..1 callback.
+        is_cancelled: Optional cancel check.
+
+    Returns:
+        One ExportResult per track (in input order).
+    """
+    if is_cancelled is not None and is_cancelled():
+        return []
+    media = [probe(p) for p in paths]
+    return export_media(media, offsets, settings, progress, is_cancelled)
+
+
 def sync_and_trim(
     paths: list[Path],
     output_dir: Path,
@@ -296,6 +311,9 @@ def sync_and_trim(
     is_cancelled: Callable[[], bool] | None = None,
 ) -> list[ExportResult]:
     """Probe, sync, pick a trim range, and export — the one-call convenience.
+
+    The inputs are probed once here and the resulting MediaInfo is reused for
+    both alignment and export, so each file is only probed a single time.
 
     Args:
         paths: Input media files.
@@ -312,19 +330,21 @@ def sync_and_trim(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    media = [probe(p) for p in paths]
+
     def sync_progress(f: float) -> None:
         if progress is not None:
             progress(0.5 * f)
 
-    offsets = compute_sync_offsets(
-        paths,
+    offsets = offsets_from_media(
+        media,
         reference_index=reference_index,
         refine=refine,
         progress=sync_progress,
         is_cancelled=is_cancelled,
     )
 
-    durations = [probe(p).duration for p in paths]
+    durations = [m.duration for m in media]
     rng = (common_time_range if trim == "common" else full_time_range)(
         durations, offsets,
     )
@@ -334,7 +354,7 @@ def sync_and_trim(
         if progress is not None:
             progress(0.5 + 0.5 * f)
 
-    return export_tracks(
-        paths, offsets, settings,
+    return export_media(
+        media, offsets, settings,
         progress=export_progress, is_cancelled=is_cancelled,
     )
