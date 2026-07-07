@@ -41,7 +41,9 @@ def _parabolic_peak(corr: np.ndarray, peak: int) -> float:
         return float(peak)
     y0, y1, y2 = float(corr[peak - 1]), float(corr[peak]), float(corr[peak + 1])
     denom = y0 - 2.0 * y1 + y2
-    if denom == 0.0:
+    # Near-colinear/flat triplet: interpolation is ill-conditioned, keep the
+    # integer peak rather than dividing by a tiny denominator.
+    if abs(denom) < 1e-12:
         return float(peak)
     return peak + 0.5 * (y0 - y2) / denom
 

@@ -3,6 +3,11 @@ import pytest
 from clapsync.app.media import probe, MediaInfo
 
 
+def test_probe_missing_file_raises_filenotfound(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        probe(tmp_path / "nope.mp4")
+
+
 @pytest.mark.slow
 def test_probe_audio_only(tone_wav):
     path, sr = tone_wav(seconds=0.5, sample_rate=48000)

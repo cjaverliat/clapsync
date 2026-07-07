@@ -23,10 +23,15 @@ class MediaInfo:
 
 
 def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
-    """Return (has_audio, sample_rate, duration) or (False, None, None)."""
+    """Return (has_audio, sample_rate, duration) or (False, None, None).
+
+    torchcodec raises RuntimeError (undecodable) or ValueError (no such stream)
+    when there is no audio; only those are caught so OSError/PermissionError
+    and other real failures propagate.
+    """
     try:
         meta = AudioDecoder(str(path)).metadata
-    except Exception:
+    except (RuntimeError, ValueError):
         return False, None, None
     return True, int(meta.sample_rate), meta.duration_seconds
 
@@ -44,14 +49,17 @@ def probe(path: Path) -> MediaInfo:
         A populated MediaInfo.
 
     Raises:
+        FileNotFoundError: If the path does not exist.
         ValueError: If the file has neither a video nor an audio stream.
     """
     path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
     has_audio, sample_rate, audio_dur = _audio_meta(path)
 
     try:
         vmeta = VideoDecoder(str(path)).metadata
-    except Exception:
+    except (RuntimeError, ValueError):
         vmeta = None
 
     if vmeta is not None:
