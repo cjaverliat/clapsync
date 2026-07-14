@@ -4,6 +4,7 @@ import logging
 import queue
 import time
 from pathlib import Path
+from threading import Thread
 from typing import Any
 
 import numpy as np
@@ -35,8 +36,13 @@ class VideoGroupWorker(QObject):
 
     All tracks decode in parallel and emit as one atomic per-tick batch, so
     every ``frames_ready`` is synchronized to a single global timestamp.
-    Pacing is wall-clock: the tick to show is derived from elapsed real time,
-    so playback stays real-time and skips ticks (one seek) if decode lags.
+
+    Display rate is decoupled from decode rate: frames are emitted on a steady
+    ``_FPS`` wall-clock grid, re-emitting the most recent decoded frame when
+    decode hasn't produced a new one, while decode runs best-effort but never
+    ahead of the clock. When decode keeps up (e.g. 1080p) every emit is a fresh
+    frame — full motion; when it can't (heavy 4K), the display holds ``_FPS``
+    and motion degrades gracefully instead of the playback clock lagging.
 
     Commands are sent via ``cmd(*args)`` from any thread; ``run`` must be
     connected to a QThread's ``started`` signal.
@@ -51,6 +57,10 @@ class VideoGroupWorker(QObject):
         super().__init__()
         self._cmds: queue.Queue = queue.Queue()
         self._seek_gen: int = 0
+        # Shared between the decode thread (writer) and the emit loop (reader).
+        self._latest: tuple[list[np.ndarray | None], float] | None = None
+        self._playing: bool = False
+        self._stop: bool = False
 
     def cmd(self, *args: Any) -> None:
         """Thread-safe: enqueue a command tuple."""
@@ -69,24 +79,49 @@ class VideoGroupWorker(QObject):
         ]
         return VideoGroupDecoder(tracks, global_fps=_FPS)
 
-    def _deliver(self, tick: GroupFrame) -> None:
-        frames = [
+    def _convert(self, tick: GroupFrame) -> list[np.ndarray | None]:
+        return [
             _to_numpy(f) if valid else None
             for f, valid in zip(tick.frames, tick.valid)
         ]
-        self.frames_ready.emit(frames, tick.pts, self._seek_gen)
 
     @Slot()
     def run(self) -> None:
+        """Emit the latest decoded frame on a steady _FPS grid.
+
+        Decode happens on ``_decode_loop`` (a separate thread) so a slow
+        ``next_tick`` never stalls emission: when decode can't keep up the same
+        frame is re-emitted, holding the display at _FPS.
+        """
+        self._stop = False
+        decoder = Thread(target=self._decode_loop, daemon=True)
+        decoder.start()
+        next_emit = time.perf_counter()
+        try:
+            while not self._stop:
+                now = time.perf_counter()
+                cur = self._latest
+                if self._playing and cur is not None:
+                    if next_emit < now - 0.1:  # after a stall, drop missed slots
+                        next_emit = now
+                    while next_emit <= now:
+                        self.frames_ready.emit(cur[0], cur[1], self._seek_gen)
+                        next_emit += 1.0 / _FPS
+                else:
+                    next_emit = now
+                QThread.msleep(1)
+        finally:
+            self._stop = True
+            decoder.join()
+
+    def _decode_loop(self) -> None:
         group: VideoGroupDecoder | None = None
         offsets: list[float] = []
-        playing = False
         t0 = 0.0
         base_idx = 0  # group tick index playback started from
 
         try:
-            while True:
-                stop = False
+            while not self._stop:
                 while True:
                     try:
                         cmd = self._cmds.get_nowait()
@@ -103,7 +138,8 @@ class VideoGroupWorker(QObject):
                         except Exception:
                             logger.exception("VideoGroupDecoder open failed")
                             group = None
-                        playing = False
+                        self._playing = False
+                        self._latest = None
 
                     elif op == "seek":
                         ts, gen = cmd[1], cmd[2]
@@ -124,7 +160,8 @@ class VideoGroupWorker(QObject):
                             group.seek_to_index(min(round(ts * _FPS), group.num_steps))
                             tick = group.next_tick()
                             if tick is not None:
-                                self._deliver(tick)
+                                self._latest = (self._convert(tick), tick.pts)
+                                self.frames_ready.emit(*self._latest, self._seek_gen)
                             self.loading_changed.emit(False)
                         t0, base_idx = time.perf_counter(), group.position if group else 0
 
@@ -137,44 +174,45 @@ class VideoGroupWorker(QObject):
                         offsets = new
 
                     elif op == "play":
-                        playing = True
+                        self._playing = True
                         t0, base_idx = time.perf_counter(), group.position if group else 0
 
                     elif op == "pause":
-                        playing = False
+                        self._playing = False
 
                     elif op == "stop":
-                        stop = True
+                        self._stop = True
                         break
 
-                if stop:
+                if self._stop:
                     break
 
-                if not playing or group is None:
+                if not self._playing or group is None:
                     try:
                         self._cmds.put(self._cmds.get(timeout=0.05))
                     except queue.Empty:
                         pass
                     continue
 
-                # ── play the next tick in sequence ────────────────────────────
-                tick = group.next_tick()
-                if tick is None:
-                    playing = False
+                # Decode toward the wall-clock tick, one step per loop, never
+                # ahead of the clock. Blocking here is fine — the emit loop runs
+                # independently and re-emits the last frame while we wait.
+                now = time.perf_counter()
+                disp_tick = base_idx + round((now - t0) * _FPS)
+                if disp_tick >= group.num_steps and group.position >= group.num_steps:
+                    self._playing = False
                     self.eof_reached.emit()
                     continue
-                self._deliver(tick)
-
-                # Cap the rate at _FPS: sleep until this tick's wall slot. If
-                # decode already ran past it (can't keep up), don't sleep — play
-                # at the decode ceiling and let the clock drift, never seek to
-                # catch up (a per-tick seek rebuilds every prefetcher: thrash).
-                deadline = t0 + (group.position - base_idx) / _FPS
-                while time.perf_counter() < deadline and self._cmds.empty():
+                if group.position <= disp_tick and group.position < group.num_steps:
+                    tick = group.next_tick()
+                    if tick is not None:
+                        self._latest = (self._convert(tick), tick.pts)
+                else:
                     QThread.msleep(1)
         except Exception:
-            logger.exception("VideoGroupWorker crashed")
+            logger.exception("VideoGroupWorker decode loop crashed")
         finally:
+            self._stop = True
             if group is not None:
                 group.close()
 

@@ -2,9 +2,10 @@
 
 Drives the real ``SyncEditorWindow`` through the offscreen Qt platform: the
 worker thread decodes on the GPU, emits ``frames_ready``, and the widgets paint
-``QPixmap``s — the full pipeline, no Qt server needed. Playback is wall-clock
-throttled to 30 fps, so this measures whether decode *sustains* 30 fps for
-6 tracks at 1080p and at 4K (not the raw decode ceiling).
+``QPixmap``s — the full pipeline, no Qt server needed. Display is decoupled from
+decode and emitted on a steady 30 fps grid, so this checks that playback
+*delivers* 30 fps for 6 tracks at 1080p and 4K (motion may repeat frames under
+a decode shortfall; the display rate must hold).
 
 Inputs are generated with ffmpeg (testsrc2, real motion/detail — a solid color
 would decode unrealistically fast), so no video is checked into the repo. One
@@ -42,10 +43,10 @@ WARMUP_S = 1.5     # let prefetchers prime before timing
 MEASURE_S = 4.0    # playback window actually timed
 MIN_FPS = 24.0     # 0.8 x the 30 fps target: catches lag/regressions
 
-# (id, width, height, gate). 1080p is the supported preview target and is
-# asserted; 4K is a stress probe -- 6x 2160p decode is beyond a single GPU's
-# NVDEC realtime budget, so its fps is measured and reported, not gated.
-RESOLUTIONS = [("1080p", 1920, 1080, True), ("4K", 3840, 2160, False)]
+# (id, width, height, gate). Both gated: the display rate is decoupled from
+# decode, so playback holds 30 fps at 4K too (motion drops under a decode
+# shortfall, but the delivered frame rate must not).
+RESOLUTIONS = [("1080p", 1920, 1080, True), ("4K", 3840, 2160, True)]
 
 
 def _generate(path: Path, w: int, h: int) -> None:
