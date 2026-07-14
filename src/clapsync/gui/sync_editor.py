@@ -23,18 +23,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from framepipe import VideoInfo, get_video_info, get_display_size
 from clapsync.app import ExportResult, ExportSettings
+from clapsync.app.media import MediaInfo, probe
 from clapsync.core import TimeRange
 from clapsync.gui.export_dialog import ExportDialog
-from clapsync.gui.video_player import VideoPlayerWidget, PlaybackClock, VideoGroupWorker
+from clapsync.gui.video_player import VideoPlayerWidget, VideoGroupWorker
 from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
 from clapsync.gui.workers import ExportWorker
 
 logger = logging.getLogger(__name__)
-
-# Low resolution cap for the mosaic preview — keeps decoding fast.
-_MOSAIC_MAX_EDGE = 480
 
 
 def _fmt(s: float) -> str:
@@ -67,7 +64,7 @@ class SyncEditorWindow(QMainWindow):
         self.setWindowTitle("clapsync")
         self.resize(1200, 700)
 
-        self._video_infos: list[VideoInfo] = []
+        self._video_infos: list[MediaInfo] = []
         self._offsets: list[float] = list(offsets)
         self._trim_start: float = 0.0
         self._trim_end: float = 0.0
@@ -81,14 +78,14 @@ class SyncEditorWindow(QMainWindow):
         self._seek_gen: int = 0
 
         for path in video_paths:
-            logger.debug("get_video_info: %s", path.name)
+            logger.debug("probe: %s", path.name)
             try:
-                info = get_video_info(path)
+                info = probe(path)
             except Exception as exc:
                 QMessageBox.warning(self, "Warning", f"Could not read {path.name}: {exc}")
                 continue
             logger.debug(
-                "get_video_info done: %s  duration=%.2fs  %dx%d",
+                "probe done: %s  duration=%.2fs  %dx%d",
                 path.name, info.duration, info.width, info.height,
             )
             self._video_infos.append(info)
@@ -239,10 +236,6 @@ class SyncEditorWindow(QMainWindow):
 
     def _load_all_videos(self) -> None:
         paths = [info.path for info in self._video_infos]
-        display_sizes = [
-            get_display_size(info.width, info.height, _MOSAIC_MAX_EDGE)
-            for info in self._video_infos
-        ]
 
         for i, player in enumerate(self._players):
             player._offset_s = self._offsets[i]
@@ -271,7 +264,7 @@ class SyncEditorWindow(QMainWindow):
         logger.info(
             "_load_all_videos: opening %d video(s) via VideoGroupWorker", len(paths)
         )
-        worker.cmd("open", paths, self._offsets[:], display_sizes)
+        worker.cmd("open", paths, self._offsets[:])
         self._sync_seek_all(self._trim_start)
 
     def _stop_group_worker(self) -> None:
@@ -291,12 +284,12 @@ class SyncEditorWindow(QMainWindow):
     @Slot(object, float, int)
     def _on_frames_ready(
         self,
-        frames: list[tuple[np.ndarray | None, float]],
+        frames: list[np.ndarray | None],
         global_ts: float,
         seek_gen: int,
     ) -> None:
-        for player, (frame, local_pts_s) in zip(self._players, frames):
-            player.display_frame(frame, local_pts_s, global_ts)
+        for player, frame in zip(self._players, frames):
+            player.display_frame(frame, global_ts)
         # Reject frames that were emitted before the most recent seek was
         # processed by the worker — their timestamps pre-date the new position.
         if global_ts >= 0.0 and seek_gen >= self._seek_gen:
@@ -321,9 +314,8 @@ class SyncEditorWindow(QMainWindow):
         if self._is_playing and self._loop_checkbox.isChecked():
             self._sync_seek_all(self._trim_start)
             self._global_pos = self._trim_start
-            clock = PlaybackClock.now(self._trim_start)
             if self._group_worker is not None:
-                self._group_worker.cmd("play", clock)
+                self._group_worker.cmd("play")
             return
         self._is_playing = False
         self._play_btn.setText("▶  Play")
@@ -341,10 +333,9 @@ class SyncEditorWindow(QMainWindow):
             if self._global_pos >= self._trim_end - 0.05 or self._global_pos < self._trim_start:
                 self._sync_seek_all(self._trim_start)
                 self._global_pos = self._trim_start
-            clock = PlaybackClock.now(self._global_pos)
             self._is_playing = True
             if self._group_worker is not None:
-                self._group_worker.cmd("play", clock)
+                self._group_worker.cmd("play")
             self._play_btn.setText("⏸  Pause")
 
     def _sync_seek_all(self, global_s: float) -> None:
@@ -360,10 +351,8 @@ class SyncEditorWindow(QMainWindow):
         was_playing = self._is_playing
         self._global_pos = global_s
         self._sync_seek_all(global_s)
-        if was_playing:
-            clock = PlaybackClock.now(global_s)
-            if self._group_worker is not None:
-                self._group_worker.cmd("play", clock)
+        if was_playing and self._group_worker is not None:
+            self._group_worker.cmd("play")
         self._timeline.set_playhead(global_s)
         self._update_time_label(global_s)
 
@@ -393,10 +382,8 @@ class SyncEditorWindow(QMainWindow):
             self._sync_seek_all(clamped)
             self._timeline.set_playhead(clamped)
             self._update_time_label(clamped)
-        if self._is_playing:
-            clock = PlaybackClock.now(self._global_pos)
-            if self._group_worker is not None:
-                self._group_worker.cmd("play", clock)
+        if self._is_playing and self._group_worker is not None:
+            self._group_worker.cmd("play")
 
     @Slot(float)
     def _on_position_changed(self, global_s: float) -> None:
@@ -407,9 +394,8 @@ class SyncEditorWindow(QMainWindow):
             if self._loop_checkbox.isChecked():
                 self._sync_seek_all(self._trim_start)
                 self._global_pos = self._trim_start
-                clock = PlaybackClock.now(self._trim_start)
                 if self._group_worker is not None:
-                    self._group_worker.cmd("play", clock)
+                    self._group_worker.cmd("play")
             else:
                 self._is_playing = False
                 if self._group_worker is not None:
