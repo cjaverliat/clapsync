@@ -2,7 +2,7 @@ import av
 import pytest
 import torch
 
-from clapsync.app.encode import encode_clip, pick_video_codec
+from clapsync.app.encode import encode_clip, pick_video_codec, _quality_options
 
 
 def _frames(n=30, h=48, w=64):
@@ -65,3 +65,29 @@ def test_encode_video_without_fps_raises(tmp_path):
 def test_encode_audio_without_rate_raises(tmp_path):
     with pytest.raises(ValueError):
         encode_clip(tmp_path / "a.wav", None, None, _tone(1.0), None)
+
+
+def test_quality_options_nvenc_uses_cq():
+    """h264_nvenc uses cq, not crf. NVENC ignores unknown options silently."""
+    result = _quality_options("h264_nvenc", 18)
+    assert result == {"cq": "18"}
+    assert "crf" not in result
+
+
+def test_quality_options_nvenc_with_different_crf():
+    """Ensure non-default crf values are correctly mapped to cq."""
+    result = _quality_options("h264_nvenc", 23)
+    assert result == {"cq": "23"}
+    assert "crf" not in result
+
+
+def test_quality_options_libx264_uses_crf():
+    """libx264 and other codecs use crf."""
+    result = _quality_options("libx264", 18)
+    assert result == {"crf": "18"}
+
+
+def test_quality_options_other_codec_uses_crf():
+    """Any codec other than h264_nvenc uses crf."""
+    result = _quality_options("libx265", 21)
+    assert result == {"crf": "21"}
