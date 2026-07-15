@@ -65,6 +65,9 @@ def probe(path: Path) -> MediaInfo:
         raise FileNotFoundError(path)
     has_audio, sample_rate, audio_dur = _audio_meta(path)
 
+    # extract_video_metadata indexes streams.video[0] unguarded, so audio-only
+    # input raises bare IndexError. We catch it to detect "no video stream" and
+    # fall back to audio-only.
     try:
         vmeta = extract_video_metadata(str(path))
     except (av.FFmpegError, ValueError, RuntimeError, IndexError):
