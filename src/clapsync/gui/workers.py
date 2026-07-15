@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 class OffsetWorker(QObject):
     progress_value = Signal(int)  # 0..1000
+    status = Signal(str)  # human-readable current stage
     finished = Signal(list)
     failed = Signal(str)
 
@@ -33,6 +34,7 @@ class OffsetWorker(QObject):
             offsets = compute_sync_offsets(
                 self._paths,
                 progress=lambda f: self.progress_value.emit(int(f * 1000)),
+                status=lambda s: self.status.emit(s),
             )
             self.finished.emit(offsets)
         except Exception as exc:  # noqa: BLE001
@@ -52,7 +54,7 @@ def compute_offsets_with_progress(
     Returns:
         Computed offsets, or None if cancelled or an error occurred.
     """
-    dialog = QProgressDialog("Analyzing audio…", "Cancel", 0, 1000, parent)
+    dialog = QProgressDialog("Preparing…", "Cancel", 0, 1000, parent)
     dialog.setWindowTitle("Computing Offsets")
     dialog.setMinimumWidth(420)
     dialog.setValue(0)
@@ -68,6 +70,9 @@ def compute_offsets_with_progress(
     def on_value(v: int) -> None:
         dialog.setValue(v)
 
+    def on_status(msg: str) -> None:
+        dialog.setLabelText(msg)
+
     def on_finished(offsets: list) -> None:
         nonlocal result
         result = offsets
@@ -80,6 +85,7 @@ def compute_offsets_with_progress(
         thread.quit()
 
     worker.progress_value.connect(on_value)
+    worker.status.connect(on_status)
     worker.finished.connect(on_finished)
     worker.failed.connect(on_failed)
     thread.started.connect(worker.run)

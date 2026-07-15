@@ -17,7 +17,7 @@ def test_reference_offset_is_zero_and_others_signed(monkeypatch):
 
     monkeypatch.setattr(sync_mod, "probe", lambda p: _info(str(p), 5.0))
 
-    def fake_load(path, target_rate=None):
+    def fake_load(path, target_rate=None, progress=None):
         return torch.zeros(1, 100), 48000
 
     def fake_align(waveforms, rates, *, refine="parabolic", reference_index=0, progress=None):
@@ -36,10 +36,22 @@ def test_progress_reaches_one(monkeypatch):
     paths = [Path("a"), Path("b")]
 
     monkeypatch.setattr(sync_mod, "probe", lambda p: _info(str(p), 1.0))
-    monkeypatch.setattr(sync_mod, "load_audio",
-                        lambda path, target_rate=None: (torch.zeros(1, 10), 48000))
-    monkeypatch.setattr(sync_mod, "align_waveforms",
-                        lambda *a, **k: [0.0, 0.1])
+
+    def fake_load(path, target_rate=None, progress=None):
+        if progress is not None:
+            progress(1.0)  # this file fully loaded
+        return torch.zeros(1, 10), 48000
+
+    def fake_align(*a, progress=None, **k):
+        if progress is not None:
+            progress(1.0)
+        return [0.0, 0.1]
+
+    monkeypatch.setattr(sync_mod, "load_audio", fake_load)
+    monkeypatch.setattr(sync_mod, "align_waveforms", fake_align)
     seen = []
     compute_sync_offsets(paths, progress=seen.append)
     assert seen and seen[-1] == 1.0
+    # Each file drives the bar 0..1 on its own (reset then climb), so 1.0
+    # appears once per file, not just at the very end.
+    assert seen.count(1.0) >= len(paths)

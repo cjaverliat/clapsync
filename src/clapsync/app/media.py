@@ -58,7 +58,10 @@ def probe(path: Path) -> MediaInfo:
     has_audio, sample_rate, audio_dur = _audio_meta(path)
 
     try:
-        vmeta = VideoDecoder(str(path)).metadata
+        # approximate seek_mode reads container metadata only; the default
+        # scans every packet to build an exact frame index (~15 s on long
+        # GoPro clips) which probing never needs.
+        vmeta = VideoDecoder(str(path), seek_mode="approximate").metadata
     except (RuntimeError, ValueError):
         vmeta = None
 

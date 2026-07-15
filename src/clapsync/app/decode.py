@@ -2,27 +2,51 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import torch
 from torchcodec.decoders import AudioDecoder, VideoDecoder
 
+# Audio is decoded in windows of this many seconds so ``progress`` can report
+# fine-grained 0..1 for a single file instead of a jump at the end.
+_AUDIO_CHUNK_S = 5.0
+
 
 def load_audio(
-    path: Path, target_rate: int | None = None
+    path: Path,
+    target_rate: int | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> tuple[torch.Tensor, int]:
     """Load a peak-normalized mono waveform from any audio/video file.
 
     Args:
         path: Source media path.
         target_rate: If set, decode/resample to this sample rate.
+        progress: Optional 0..1 callback reporting this file's decode fraction.
+            When given, the file is decoded in windows so the bar climbs
+            progressively; otherwise it is decoded in one call.
 
     Returns:
         (waveform, sample_rate) where waveform is float32 shape (1, N).
     """
     decoder = AudioDecoder(str(path), sample_rate=target_rate)
-    samples = decoder.get_all_samples()
-    data = samples.data  # (num_channels, N) float32 in [-1, 1]
-    rate = samples.sample_rate
+    duration = decoder.metadata.duration_seconds
+
+    if progress is None or not duration:
+        samples = decoder.get_all_samples()
+        data, rate = samples.data, samples.sample_rate
+    else:
+        chunks: list[torch.Tensor] = []
+        rate = decoder.metadata.sample_rate
+        start = 0.0
+        while start < duration:
+            stop = min(start + _AUDIO_CHUNK_S, duration)
+            samples = decoder.get_samples_played_in_range(start, stop)
+            chunks.append(samples.data)
+            rate = samples.sample_rate
+            start = stop
+            progress(min(start / duration, 1.0))
+        data = torch.cat(chunks, dim=1)
 
     mono = data.mean(dim=0, keepdim=True) if data.shape[0] > 1 else data
     peak = mono.abs().max()
