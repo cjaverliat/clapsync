@@ -115,10 +115,15 @@ def decode_frames_at(
     decoder = PyAvVideoDecoder(
         str(path), device=device, batch_size=1, start_frame=int(plan[0]),
     )
-    batches = []
-    with IndexedFramePrefetcher(decoder, plan) as stream:
-        while (batch := stream.next_batch()) is not None:
-            batches.append(batch.frames)
+    # Nested with: if IndexedFramePrefetcher's constructor raises, `decoder`
+    # is still closed here. On the normal path close_decoder=True (the
+    # default) has the prefetcher close it too, but VideoDecoder.close() is
+    # idempotent, so this is not a double-close.
+    with decoder:
+        batches = []
+        with IndexedFramePrefetcher(decoder, plan) as stream:
+            while (batch := stream.next_batch()) is not None:
+                batches.append(batch.frames)
 
     frames = torch.cat(batches, dim=0)
     return frames[torch.argsort(order)]
