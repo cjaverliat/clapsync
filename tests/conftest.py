@@ -119,6 +119,43 @@ def rgb_video(tmp_path: Path):
 
 
 @pytest.fixture
+def indexed_video(tmp_path: Path):
+    """Factory: write a video whose frames are distinguishable by content.
+
+    Frame i is a solid gray level of i * _INDEXED_STEP, so a decoded frame's
+    mean brightness recovers which source frame it is — unlike a solid-color
+    fixture (e.g. `rgb_video`), where every frame compares equal and ordering
+    bugs (a broken searchsorted/sort/inverse-permutation) go undetected. Kept
+    short (n <= 12 by default) so i * _INDEXED_STEP stays under 256 and
+    distinct per frame.
+    """
+
+    def _make(n: int = 8, fps: float = 10.0, w: int = 64, h: int = 48,
+              name: str = "idx.mp4"):
+        assert n * _INDEXED_STEP <= 255, "index encoding would wrap"
+        path = tmp_path / name
+        frames = torch.zeros((n, 3, h, w), dtype=torch.uint8)
+        for i in range(n):
+            frames[i] = i * _INDEXED_STEP
+        with av.open(str(path), mode="w") as container:
+            stream = _add_video_stream(container, w, h, fps)
+            _write_video(container, stream, frames)
+        return path, fps, n, w, h
+
+    return _make
+
+
+# Gray level per frame for `indexed_video`; a decoded frame's mean brightness
+# divided by this recovers its source frame index (see that fixture).
+_INDEXED_STEP = 20
+
+
+def frame_index(frame: torch.Tensor) -> int:
+    """Recover the source index of a frame produced by `indexed_video`."""
+    return int(round(float(frame.float().mean()) / _INDEXED_STEP))
+
+
+@pytest.fixture
 def av_video(tmp_path: Path):
     """Factory: write a muxed audio+video file, return (path, fps, n, w, h, sr)."""
 
