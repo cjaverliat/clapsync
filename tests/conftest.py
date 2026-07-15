@@ -8,6 +8,7 @@ silently produce matching fixtures.
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 from pathlib import Path
 
 import av
@@ -62,7 +63,10 @@ def _add_video_stream(container, w: int, h: int, fps: float):
 
     See `_add_audio_stream` for why stream creation is split from writing.
     """
-    stream = container.add_stream("libx264", rate=int(round(fps)))
+    # Exact rational, not int(round(...)) — see clapsync.app.encode.encode_clip
+    # for why rounding a fractional fps (e.g. NTSC 59.94) is wrong. Harmless
+    # at the fps=30.0 these fixtures use today, but kept consistent.
+    stream = container.add_stream("libx264", rate=Fraction(fps).limit_denominator(65535))
     stream.width = w
     stream.height = h
     stream.pix_fmt = "yuv420p"

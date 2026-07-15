@@ -1,6 +1,7 @@
 """Muxed audio+video encoding via PyAV."""
 from __future__ import annotations
 
+from fractions import Fraction
 from pathlib import Path
 
 import av
@@ -96,7 +97,12 @@ def encode_clip(
         if video_frames is not None:
             _, _channels, height, width = video_frames.shape
             codec = video_codec or pick_video_codec(device)
-            vstream = container.add_stream(codec, rate=int(round(video_fps)))
+            # Exact rational, not int(round(...)): rounding a GoPro's 59.94
+            # (60000/1001) up to 60 makes the container declare a rate the
+            # frames were not encoded at, desyncing video from its own audio
+            # (0.218s drift on a 218s clip). PyAV accepts a Fraction directly.
+            rate = Fraction(video_fps).limit_denominator(65535)
+            vstream = container.add_stream(codec, rate=rate)
             vstream.width = width
             vstream.height = height
             vstream.pix_fmt = "yuv420p"

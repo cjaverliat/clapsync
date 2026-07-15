@@ -1,3 +1,5 @@
+from fractions import Fraction
+
 import av
 import pytest
 import torch
@@ -36,6 +38,20 @@ def test_encode_video_only(tmp_path):
         v = c.streams.video[0]
         assert (v.width, v.height) == (64, 48)
         assert sum(1 for _ in c.decode(v)) == 30
+
+
+def test_encode_video_keeps_fractional_fps_exact(tmp_path):
+    """GoPro NTSC rate 60000/1001 (59.94) must not round to 60.
+
+    Rounding it makes the container declare a rate the frames were not
+    encoded at, desyncing an exported clip from its own muxed audio.
+    """
+    out = tmp_path / "ntsc.mp4"
+    fps = 60000 / 1001
+    encode_clip(out, _frames(n=12), fps, None, None, video_codec="libx264")
+    with av.open(str(out)) as c:
+        v = c.streams.video[0]
+        assert v.average_rate == Fraction(60000, 1001)
 
 
 def test_encode_muxed_av(tmp_path):
