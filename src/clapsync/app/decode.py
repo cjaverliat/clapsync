@@ -1,15 +1,18 @@
-"""Media decode wrappers over torchcodec (audio waveforms, video frames)."""
+"""Media decode wrappers over framepipe/PyAV (audio waveforms, video frames)."""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable
 
+import av
+import numpy as np
 import torch
-from torchcodec.decoders import AudioDecoder, VideoDecoder
+from torchcodec.decoders import VideoDecoder
 
-# Audio is decoded in windows of this many seconds so ``progress`` can report
-# fine-grained 0..1 for a single file instead of a jump at the end.
-_AUDIO_CHUNK_S = 5.0
+# Progress is reported at most once per this fraction of a file. A 218 s GoPro
+# clip decodes to ~10k AAC frames; calling back on each one costs real time and
+# tells the GUI nothing it can draw.
+_PROGRESS_STEP = 0.01
 
 
 def load_audio(
@@ -23,30 +26,50 @@ def load_audio(
         path: Source media path.
         target_rate: If set, decode/resample to this sample rate.
         progress: Optional 0..1 callback reporting this file's decode fraction.
-            When given, the file is decoded in windows so the bar climbs
-            progressively; otherwise it is decoded in one call.
+            Called as frames arrive, throttled to ~1% steps, ending at 1.0.
 
     Returns:
         (waveform, sample_rate) where waveform is float32 shape (1, N).
-    """
-    decoder = AudioDecoder(str(path), sample_rate=target_rate)
-    duration = decoder.metadata.duration_seconds
 
-    if progress is None or not duration:
-        samples = decoder.get_all_samples()
-        data, rate = samples.data, samples.sample_rate
-    else:
-        chunks: list[torch.Tensor] = []
-        rate = decoder.metadata.sample_rate
-        start = 0.0
-        while start < duration:
-            stop = min(start + _AUDIO_CHUNK_S, duration)
-            samples = decoder.get_samples_played_in_range(start, stop)
-            chunks.append(samples.data)
-            rate = samples.sample_rate
-            start = stop
-            progress(min(start / duration, 1.0))
-        data = torch.cat(chunks, dim=1)
+    Raises:
+        ValueError: If the file has no audio stream.
+    """
+    chunks: list[np.ndarray] = []
+    with av.open(str(path)) as container:
+        if not container.streams.audio:
+            raise ValueError(f"no audio stream in {path}")
+        stream = container.streams.audio[0]
+        stream.thread_type = "AUTO"
+
+        rate = int(target_rate or stream.codec_context.sample_rate)
+        layout = stream.codec_context.layout
+        # fltp gives to_ndarray() a planar (channels, samples) float32 array
+        # regardless of what the codec natively emits.
+        resampler = av.AudioResampler(format="fltp", layout=layout, rate=rate)
+
+        time_base = float(stream.time_base)
+        duration = (
+            float(stream.duration * stream.time_base) if stream.duration else 0.0
+        )
+        last = -1.0
+        for frame in container.decode(stream):
+            for resampled in resampler.resample(frame):
+                chunks.append(resampled.to_ndarray())
+            if progress is None or not duration or frame.pts is None:
+                continue
+            fraction = min(frame.pts * time_base / duration, 1.0)
+            if fraction - last >= _PROGRESS_STEP:
+                progress(fraction)
+                last = fraction
+        for resampled in resampler.resample(None):  # flush
+            chunks.append(resampled.to_ndarray())
+
+    if progress is not None:
+        progress(1.0)
+
+    if not chunks:
+        raise ValueError(f"no audio samples decoded from {path}")
+    data = torch.from_numpy(np.concatenate(chunks, axis=1))
 
     mono = data.mean(dim=0, keepdim=True) if data.shape[0] > 1 else data
     peak = mono.abs().max()
