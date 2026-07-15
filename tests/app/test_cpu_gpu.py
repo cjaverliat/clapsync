@@ -4,10 +4,9 @@ GPU cases are skipped when no CUDA device is present, so the suite stays green
 on CPU-only machines while exercising both paths where a GPU exists. NVENC
 requires frames >= ~256x144, so GPU encode tests use that size.
 """
+import av
 import pytest
 import torch
-
-from torchcodec.decoders import VideoDecoder
 
 from clapsync.app.decode import decode_frames_at
 from clapsync.app.encode import encode_clip
@@ -18,13 +17,19 @@ cuda_only = pytest.mark.skipif(
 )
 
 
+def _frame_count(path) -> int:
+    """Decoded frame count — a muxed file's header has no reliable frame count."""
+    with av.open(str(path)) as container:
+        return sum(1 for _ in container.decode(container.streams.video[0]))
+
+
 @pytest.mark.slow
 def test_encode_cpu_libx264(tmp_path):
     out = tmp_path / "cpu.mp4"
     frames = torch.zeros((10, 3, 144, 256), dtype=torch.uint8)
     frames[:, 1] = 150
     encode_clip(out, frames, 30.0, None, None, video_codec="libx264", device="cpu")
-    assert VideoDecoder(str(out)).metadata.num_frames >= 9
+    assert _frame_count(out) >= 9
 
 
 @pytest.mark.slow
@@ -36,7 +41,7 @@ def test_encode_gpu_nvenc(tmp_path):
     encode_clip(
         out, frames, 30.0, None, None, video_codec="h264_nvenc", device="cuda",
     )
-    assert VideoDecoder(str(out)).metadata.num_frames >= 9
+    assert _frame_count(out) >= 9
 
 
 @pytest.mark.slow
