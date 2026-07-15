@@ -1,10 +1,28 @@
-"""Muxed audio+video encoding via the torchcodec multi-stream Encoder."""
+"""Muxed audio+video encoding via PyAV."""
 from __future__ import annotations
 
 from pathlib import Path
 
+import av
+import numpy as np
 import torch
-from torchcodec.encoders import Encoder
+
+# Audio codec per container. torchcodec inferred this from the extension; PyAV
+# needs it named. Verified round-trips: pcm_s16le/libmp3lame/flac are
+# sample-exact, aac pads +128 (identical to torchcodec's aac padding).
+_AUDIO_CODEC_FOR_SUFFIX = {
+    ".wav": "pcm_s16le",
+    ".m4a": "aac",
+    ".mp4": "aac",
+    ".mkv": "aac",
+    ".mov": "aac",
+    ".mp3": "libmp3lame",
+    ".flac": "flac",
+}
+_DEFAULT_AUDIO_CODEC = "aac"
+
+# Frames are handed to the encoder in blocks of this many samples.
+_AUDIO_BLOCK = 1024
 
 
 def pick_video_codec(device: str) -> str:
@@ -17,6 +35,15 @@ def pick_video_codec(device: str) -> str:
         "h264_nvenc" for CUDA devices, "libx264" otherwise.
     """
     return "h264_nvenc" if str(device).startswith("cuda") else "libx264"
+
+
+def _audio_codec_for(out_path: Path) -> str:
+    return _AUDIO_CODEC_FOR_SUFFIX.get(out_path.suffix.lower(), _DEFAULT_AUDIO_CODEC)
+
+
+def _quality_options(codec: str, crf: int) -> dict[str, str]:
+    """NVENC has no crf; its constant-quality knob is cq."""
+    return {"cq": str(crf)} if codec == "h264_nvenc" else {"crf": str(crf)}
 
 
 def encode_clip(
@@ -43,9 +70,10 @@ def encode_clip(
         sample_rate: Audio sample rate in Hz; required when audio_samples
             is given.
         video_codec: Override encoder name; defaults to pick_video_codec(device).
-        crf: Constant rate factor for the video stream (quality).
-        device: "cpu" or "cuda[:<index>]"; video frames are moved here
-            before encoding.
+        crf: Constant quality for the video stream (mapped to cq on NVENC).
+        device: "cpu" or "cuda[:<index>]"; selects the default encoder. Unlike
+            the old torchcodec path this does not move the frame tensor —
+            h264_nvenc uploads from host memory itself.
 
     Raises:
         ValueError: If required companions (fps/sample_rate) are missing, or
@@ -53,38 +81,67 @@ def encode_clip(
     """
     if video_frames is None and audio_samples is None:
         raise ValueError("encode_clip needs at least one stream")
+    if video_frames is not None and video_fps is None:
+        raise ValueError("video_fps is required when video_frames is given")
+    if audio_samples is not None and sample_rate is None:
+        raise ValueError("sample_rate is required when audio_samples is given")
 
-    encoder = Encoder()
-    vstream = None
-    astream = None
+    out_path = Path(out_path)
+    with av.open(str(out_path), mode="w") as container:
+        vstream = None
+        astream = None
+        resampler = None
+        layout = None
 
-    if video_frames is not None:
-        if video_fps is None:
-            raise ValueError("video_fps is required when video_frames is given")
-        _, _channels, height, width = video_frames.shape
-        codec = video_codec or pick_video_codec(device)
-        vstream = encoder.add_video(
-            height=height,
-            width=width,
-            frame_rate=video_fps,
-            device=device,
-            codec=codec,
-            crf=crf,
-        )
+        if video_frames is not None:
+            _, _channels, height, width = video_frames.shape
+            codec = video_codec or pick_video_codec(device)
+            vstream = container.add_stream(codec, rate=int(round(video_fps)))
+            vstream.width = width
+            vstream.height = height
+            vstream.pix_fmt = "yuv420p"
+            vstream.options = _quality_options(codec, crf)
 
-    if audio_samples is not None:
-        if sample_rate is None:
-            raise ValueError(
-                "sample_rate is required when audio_samples is given"
+        if audio_samples is not None:
+            layout = "mono" if audio_samples.shape[0] == 1 else "stereo"
+            acodec = _audio_codec_for(out_path)
+            astream = container.add_stream(acodec, rate=sample_rate, layout=layout)
+            resampler = av.AudioResampler(
+                format=astream.codec_context.format.name,
+                layout=layout,
+                rate=sample_rate,
             )
-        astream = encoder.add_audio(
-            sample_rate=sample_rate,
-            num_channels=audio_samples.shape[0],
-        )
 
-    with encoder.open_file(str(out_path)):
         if vstream is not None:
-            frames = video_frames.to(device)
-            vstream.add_frames(frames)
+            frames = video_frames.cpu()
+            for i in range(frames.shape[0]):
+                rgb = frames[i].permute(1, 2, 0).numpy()  # CHW -> HWC
+                frame = av.VideoFrame.from_ndarray(
+                    np.ascontiguousarray(rgb), format="rgb24",
+                )
+                for packet in vstream.encode(frame):
+                    container.mux(packet)
+            for packet in vstream.encode():
+                container.mux(packet)
+
         if astream is not None:
-            astream.add_samples(audio_samples)
+            samples = audio_samples.cpu().numpy().astype(np.float32)
+            pts = 0
+            for start in range(0, samples.shape[1], _AUDIO_BLOCK):
+                block = np.ascontiguousarray(
+                    samples[:, start : start + _AUDIO_BLOCK]
+                )
+                frame = av.AudioFrame.from_ndarray(
+                    block, format="fltp", layout=layout,
+                )
+                frame.sample_rate = sample_rate
+                frame.pts = pts
+                pts += block.shape[1]
+                for resampled in resampler.resample(frame):
+                    for packet in astream.encode(resampled):
+                        container.mux(packet)
+            for resampled in resampler.resample(None):  # flush resampler
+                for packet in astream.encode(resampled):
+                    container.mux(packet)
+            for packet in astream.encode():  # flush encoder
+                container.mux(packet)
