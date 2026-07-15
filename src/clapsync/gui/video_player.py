@@ -50,7 +50,9 @@ class VideoGroupWorker(QObject):
 
     # list[np.ndarray | None], global_ts, seek_gen  (None = black/gap track)
     frames_ready = Signal(object, float, int)
-    loading_changed = Signal(bool)  # True while blocked in a user seek
+    # True while blocked in a user seek, or while playback decode trails the
+    # clock (re-emitting a stale frame). False once resolved.
+    loading_changed = Signal(bool)
     eof_reached = Signal()
 
     def __init__(self) -> None:
@@ -119,6 +121,7 @@ class VideoGroupWorker(QObject):
         offsets: list[float] = []
         t0 = 0.0
         base_idx = 0  # group tick index playback started from
+        behind = False  # decode fell behind the clock -> "loading" shown
 
         try:
             while not self._stop:
@@ -164,6 +167,7 @@ class VideoGroupWorker(QObject):
                                 self.frames_ready.emit(*self._latest, self._seek_gen)
                             self.loading_changed.emit(False)
                         t0, base_idx = time.perf_counter(), group.position if group else 0
+                        behind = False
 
                     elif op == "update_offsets":
                         new = list(cmd[1])
@@ -176,6 +180,7 @@ class VideoGroupWorker(QObject):
                     elif op == "play":
                         self._playing = True
                         t0, base_idx = time.perf_counter(), group.position if group else 0
+                        behind = False
 
                     elif op == "pause":
                         self._playing = False
@@ -188,6 +193,9 @@ class VideoGroupWorker(QObject):
                     break
 
                 if not self._playing or group is None:
+                    if behind:
+                        behind = False
+                        self.loading_changed.emit(False)
                     try:
                         self._cmds.put(self._cmds.get(timeout=0.05))
                     except queue.Empty:
@@ -203,6 +211,19 @@ class VideoGroupWorker(QObject):
                     self._playing = False
                     self.eof_reached.emit()
                     continue
+
+                # Signal "loading" when decode trails the clock: the emit loop is
+                # re-showing a stale frame (playback slower than real-time). Clear
+                # it once decode catches back up. Hysteresis + the GUI's 150 ms
+                # debounce keep brief jitter from flashing the overlay.
+                drift = disp_tick - group.position
+                if behind and drift <= 1:
+                    behind = False
+                    self.loading_changed.emit(False)
+                elif not behind and drift >= 4:
+                    behind = True
+                    self.loading_changed.emit(True)
+
                 if group.position <= disp_tick and group.position < group.num_steps:
                     tick = group.next_tick()
                     if tick is not None:
