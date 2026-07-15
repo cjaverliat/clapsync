@@ -35,6 +35,29 @@ These are real numbers from this machine against `E:/Datasets/Guedelon/Carriere 
 
 **Known non-parity to accept:** none identified. AAC padding matches torchcodec exactly.
 
+### Offset baseline — the number the port must reproduce
+
+Measured 2026-07-15 on the six test files, against the current torchcodec code at `edbf535` (`sync took 69.7 s`, probe 5.9 s):
+
+```
+offsets: [0.0, -3.7834, 5.9064, 14.6969, 20.0706, 19.567]
+```
+
+| File | Duration | Offset (s) |
+|---|---|---|
+| `GoPro1/GX010037.MP4` | 218.4 s | 0.0 (reference) |
+| `GoPro2/GX010035.MP4` | 227.7 s | -3.7834 |
+| `GoPro3/GX010035.MP4` | 225.8 s | 5.9064 |
+| `GoPro4/GX010036.MP4` | 220.0 s | 14.6969 |
+| `GoPro5/GX010034.MP4` | 210.2 s | 20.0706 |
+| `GoPro6/GX010038.MP4` | 204.3 s | 19.567 |
+
+All six probe as `video 5312x2988, audio=True, 48000 Hz`. **Task 7 Step 7 must reproduce these to within 1e-3 s.** If they move, the PyAV waveform is not equivalent — stop and diff the waveform, do not adjust the expectation.
+
+### Progress baseline (the feature being preserved)
+
+Same run, per-file tick counts from the `progress` callback: **45, 47, 47, 45, 44, 42** — one per 5 s window. Every file climbed `0.000 -> 1.000` monotonically with 40+ intermediate values, i.e. no 0→100 jump. The PyAV port (Task 2) should roughly double these (~100/file, throttled to 1% steps) and must never regress to one tick per file.
+
 ## Prior Art / Context
 
 - `edbf535 feat(sync): fine-grained per-file audio loading progress` (2026-07-15) added per-file 0→100% audio progress by decoding in 5 s windows via torchcodec's `get_samples_played_in_range`. **Task 2 must preserve this behavior** — it is the feature the user asked for. PyAV gets it more directly: progress falls out of frames already being decoded, with no windowing or seeking.
