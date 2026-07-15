@@ -15,7 +15,7 @@ slate in front of. 👏
 ## Install
 
 clapsync uses [pixi](https://pixi.sh) for its environment (Python, torch,
-torchcodec, ffmpeg libraries — all handled for you):
+framepipe, PyAV, ffmpeg libraries — all handled for you):
 
 ```bash
 pixi install
@@ -59,7 +59,7 @@ set the trim range, and export. See
 
 ## The API
 
-### Pure core (`clapsync.core`) — no torchcodec required
+### Pure core (`clapsync.core`) — no media libraries required
 
 Install with `pip install clapsync` (numpy + torch + torchaudio only).
 
@@ -71,11 +71,11 @@ Install with `pip install clapsync` (numpy + torch + torchaudio only).
 | `common_time_range(durations, offsets)` | The overlap where all clips are present. |
 | `full_time_range(durations, offsets)` | The union spanning every clip. |
 
-### App layer (`clapsync.app`) — requires `clapsync[app]` (torchcodec)
+### App layer (`clapsync.app`) — requires `clapsync[app]` (framepipe + PyAV)
 
 | Function / class | What it does |
 |---|---|
-| `load_audio(path)` | Decode a file's audio track to a tensor via torchcodec. |
+| `load_audio(path)` | Decode a file's audio track to a tensor via PyAV. |
 | `compute_sync_offsets(paths)` | Probe + load + align; returns per-path offsets (seconds). |
 | `export_tracks(paths, offsets, settings)` | Trim + export with full control (resolution, fps, codec). |
 | `sync_and_trim(paths, out)` | One-call convenience: probe → sync → trim → export. |
@@ -89,7 +89,7 @@ audio and video stay locked even when the true offset falls between frames.
 
 Runnable examples in [`examples/`](examples/):
 
-- [`find_sync.py`](examples/find_sync.py) — pure: torchaudio + `clapsync.core` only (no torchcodec)
+- [`find_sync.py`](examples/find_sync.py) — pure: torchaudio + `clapsync.core` only (no media libraries)
 - [`auto_sync_trim.py`](examples/auto_sync_trim.py) — one-call sync & export
 - [`export_custom.py`](examples/export_custom.py) — manual pipeline, custom size/fps
 
@@ -106,14 +106,14 @@ pixi run python examples/auto_sync_trim.py -o synced/ cam_a.mp4 cam_b.mp4
 4. **Export** — trim each clip to that range, pad gaps, and re-encode aligned.
    GPU (NVENC) is used automatically when available, with a CPU fallback.
 
-Media decode/encode runs on [torchcodec](https://github.com/meta-pytorch/torchcodec)
-(GPU-accelerated); no `ffmpeg` command-line calls.
+Media decode/encode runs on [framepipe](https://github.com/cjaverliat/framepipe)
+for video decode and [PyAV](https://github.com/PyAV-Org/PyAV) for audio and
+muxing (both GPU-accelerated where applicable); no `ffmpeg` command-line calls.
 
 ## Requirements
 
-- A CUDA-capable GPU is recommended (torchcodec + torch on CUDA 13.0 / cu130).
-- torch and torchcodec must share the same CUDA build; torchcodec ≥ 0.13 ships on
-  cu126 and cu130. pixi pins a working combination for you.
+- A CUDA-capable GPU is recommended — framepipe's `device="cuda:0"` decode and
+  the `h264_nvenc` export path both use it.
 
 ## Build a standalone binary
 
@@ -126,7 +126,7 @@ pixi run build-clapsync
 ```
 src/clapsync/
   core/    # pure: MFCC align, time-range math (numpy/torch/torchaudio only)
-  app/     # file I/O, probe, torchcodec decode/encode, export, sync_and_trim
+  app/     # file I/O, probe, framepipe/PyAV decode/encode, export, sync_and_trim
   gui/     # PySide6 app (thin wrapper around app layer)
   cli.py   # sync / synctrim commands
 examples/  # runnable API examples

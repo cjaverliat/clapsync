@@ -3,11 +3,11 @@ name = "clapsync"
 version = "0.1.0"
 description = "Multi-camera audio-based synchronization and trimming tool"
 requires-python = ">=3.10,<3.13"
-# Abstract runtime deps for consumers. torchcodec >=0.13 provides the
-# multi-stream Encoder (muxed A/V); it requires torch 2.11. No CUDA/index is
-# pinned here on purpose — the consuming project installs torch + torchcodec
-# from the appropriate CUDA wheel index (they must share a CUDA build). This
-# workspace's own cu130 pins live in [tool.pixi.pypi-dependencies] for dev.
+# Abstract runtime deps for consumers. Media I/O is framepipe (video decode)
+# plus PyAV (audio, muxing); both bind the ffmpeg shared libraries. No CUDA
+# index is pinned here on purpose — the consuming project installs torch from
+# the appropriate CUDA wheel index. This workspace's own cu130 pins live in
+# [tool.pixi.pypi-dependencies] for dev.
 dependencies = [
     "numpy",
     "torch>=2.11",
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-app = ["torchcodec>=0.13"]
+app = ["av>=18", "framepipe @ git+https://github.com/cjaverliat/framepipe"]
 gui = ["clapsync[app]", "PySide6>=6.7,<6.8"]
 
 [project.scripts]
@@ -41,7 +41,6 @@ clapsync = { path = ".", editable = true }
 framepipe = { path = "../framepipe", editable = true }
 torch = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
 torchaudio = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
-torchcodec = { version = ">=0.13.0,<0.15.0", index = "https://download.pytorch.org/whl/cu130" }
 numpy = "*"
 av = "*"
 PySide6 = ">=6.7.0,<6.8"
@@ -75,7 +74,7 @@ default = { features = ["cuda130"], solve-group = "default" }
 dev     = { features = ["cuda130", "dev"], solve-group = "default" }
 
 [tool.pytest.ini_options]
-markers = ["slow: requires torchcodec decode/encode with real codecs"]
+markers = ["slow: requires framepipe/PyAV decode/encode with real codecs"]
 testpaths = ["tests"]
 
 [tool.pixi.tasks]
