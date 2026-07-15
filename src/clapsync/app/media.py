@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from torchcodec.decoders import AudioDecoder, VideoDecoder
+import av
+from framepipe.metadata import extract_video_metadata
 
 
 @dataclass(frozen=True)
@@ -25,19 +26,26 @@ class MediaInfo:
 def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
     """Return (has_audio, sample_rate, duration) or (False, None, None).
 
-    torchcodec raises RuntimeError (undecodable) or ValueError (no such stream)
-    when there is no audio; only those are caught so OSError/PermissionError
-    and other real failures propagate.
+    A container with no audio stream is not an error; av raises only when the
+    file itself is undecodable, which the caller reports as "no streams".
     """
     try:
-        meta = AudioDecoder(str(path)).metadata
-    except (RuntimeError, ValueError):
+        with av.open(str(path)) as container:
+            if not container.streams.audio:
+                return False, None, None
+            stream = container.streams.audio[0]
+            duration = (
+                float(stream.duration * stream.time_base)
+                if stream.duration
+                else None
+            )
+            return True, int(stream.codec_context.sample_rate), duration
+    except av.FFmpegError:
         return False, None, None
-    return True, int(meta.sample_rate), meta.duration_seconds
 
 
 def probe(path: Path) -> MediaInfo:
-    """Probe a media file via torchcodec metadata.
+    """Probe a media file via framepipe (video) and PyAV (audio) metadata.
 
     A file with a decodable video stream is kind="video"; otherwise it is
     treated as audio-only.
@@ -58,17 +66,14 @@ def probe(path: Path) -> MediaInfo:
     has_audio, sample_rate, audio_dur = _audio_meta(path)
 
     try:
-        # approximate seek_mode reads container metadata only; the default
-        # scans every packet to build an exact frame index (~15 s on long
-        # GoPro clips) which probing never needs.
-        vmeta = VideoDecoder(str(path), seek_mode="approximate").metadata
-    except (RuntimeError, ValueError):
+        vmeta = extract_video_metadata(str(path))
+    except (av.FFmpegError, ValueError, RuntimeError, IndexError):
         vmeta = None
 
     if vmeta is not None:
         return MediaInfo(
             path=path,
-            duration=vmeta.duration_seconds,
+            duration=vmeta.duration,
             has_audio=has_audio,
             kind="video",
             sample_rate=sample_rate,
