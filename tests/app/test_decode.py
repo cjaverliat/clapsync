@@ -69,3 +69,25 @@ def test_load_audio_without_progress_still_works(tone_wav):
     path, _ = tone_wav(seconds=1.0)
     wave, _ = load_audio(path)
     assert wave.shape[1] > 0
+
+
+def test_decode_frames_at_shape_and_order(rgb_video):
+    path, fps, n, w, h = rgb_video(seconds=2.0, fps=30.0, w=64, h=48)
+    frames = decode_frames_at(path, [0.0, 0.5, 1.0], device="cpu")
+    assert frames.shape == (3, 3, h, w)
+    assert frames.dtype == torch.uint8
+    assert int(frames[0, 0].float().mean()) > 200  # fixture is solid red
+
+
+def test_decode_frames_at_clamps_out_of_range(rgb_video):
+    path, fps, n, w, h = rgb_video(seconds=1.0, fps=30.0)
+    frames = decode_frames_at(path, [-5.0, 1e9], device="cpu")
+    assert frames.shape[0] == 2  # clamped, not raised
+
+
+def test_decode_frames_at_unordered_and_duplicate(rgb_video):
+    path, fps, n, w, h = rgb_video(seconds=2.0, fps=30.0)
+    frames = decode_frames_at(path, [1.0, 0.0, 1.0], device="cpu")
+    assert frames.shape[0] == 3
+    # same timestamp -> same frame, and order is caller order
+    assert torch.equal(frames[0], frames[2])

@@ -7,7 +7,8 @@ from typing import Callable
 import av
 import numpy as np
 import torch
-from torchcodec.decoders import VideoDecoder
+from framepipe import IndexedFramePrefetcher, PyAvVideoDecoder
+from framepipe.metadata import extract_video_metadata
 
 # Progress is reported at most once per this fraction of a file. A 218 s GoPro
 # clip decodes to ~10k AAC frames; calling back on each one costs real time and
@@ -84,26 +85,40 @@ def decode_frames_at(
     """Decode one frame per requested timestamp (NCHW uint8).
 
     Timestamps are clamped into the decodable stream range so callers can pass
-    boundary times without raising.
+    boundary times without raising. The frame for time t is the last one whose
+    pts <= t.
 
     Args:
         path: Source video path.
-        seconds: Presentation timestamps in seconds.
+        seconds: Presentation timestamps in seconds; may be unordered and may
+            repeat.
         device: "cpu" or "cuda" (nvdec).
 
     Returns:
         uint8 tensor of shape (len(seconds), C, H, W) on the requested device.
     """
-    decoder = VideoDecoder(str(path), device=device)
-    meta = decoder.metadata
-    lo = meta.begin_stream_seconds or 0.0
-    # Fall back to duration_seconds so the upper clamp still applies when
-    # end_stream_seconds is absent; only skip it if neither is known.
-    hi = meta.end_stream_seconds
-    if hi is None:
-        hi = meta.duration_seconds
-    eps = 1e-3
-    clamped = [
-        min(max(s, lo), (hi - eps) if hi is not None else s) for s in seconds
-    ]
-    return decoder.get_frames_played_at(clamped).data
+    if not seconds:
+        raise ValueError("decode_frames_at needs at least one timestamp")
+
+    pts = extract_video_metadata(str(path)).pts  # (num_frames,) seconds, CPU
+    wanted = torch.tensor(seconds, dtype=pts.dtype).clamp_(
+        float(pts[0]), float(pts[-1])
+    )
+    # last frame with pts <= t, matching torchcodec's get_frames_played_at
+    idx = (torch.searchsorted(pts, wanted, right=True) - 1).clamp_(0, len(pts) - 1)
+
+    # The prefetcher consumes a forward-ordered plan; sort, then invert back to
+    # caller order so unordered/duplicate timestamps behave.
+    order = torch.argsort(idx)
+    plan = idx[order].tolist()
+
+    decoder = PyAvVideoDecoder(
+        str(path), device=device, batch_size=1, start_frame=int(plan[0]),
+    )
+    batches = []
+    with IndexedFramePrefetcher(decoder, plan) as stream:
+        while (batch := stream.next_batch()) is not None:
+            batches.append(batch.frames)
+
+    frames = torch.cat(batches, dim=0)
+    return frames[torch.argsort(order)]
