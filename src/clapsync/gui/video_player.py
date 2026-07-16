@@ -71,9 +71,16 @@ class VideoGroupWorker(QObject):
     @staticmethod
     def _open(paths: list[Path], offsets: list[float]) -> VideoGroupDecoder:
         resize = Resize(_MOSAIC_MAX_EDGE)
+        # batch_size=1: each decoded batch is full-resolution RGB held on the
+        # GPU until resize, so on 4K a larger batch multiplies both GPU memory
+        # (measured 6 GB peak for 3 tracks at batch 8 vs ~1 GB at batch 1 —
+        # enough to spill into WDDM shared host RAM and stall the machine) and
+        # seek latency (a seek decodes a whole batch just to show one frame:
+        # 4.3 s at batch 8 vs 0.2 s at batch 1). Preview is one-frame-per-tick,
+        # so batching buys nothing here.
         tracks = [
             TrackSpec(
-                PyAvVideoDecoder(p, device=_DEVICE, batch_size=8),
+                PyAvVideoDecoder(p, device=_DEVICE, batch_size=1),
                 offset=off,
                 transform=resize,
             )
@@ -98,19 +105,22 @@ class VideoGroupWorker(QObject):
         self._stop = False
         decoder = Thread(target=self._decode_loop, daemon=True)
         decoder.start()
-        next_emit = time.perf_counter()
+        last = None
         try:
             while not self._stop:
-                now = time.perf_counter()
                 cur = self._latest
-                if self._playing and cur is not None:
-                    if next_emit < now - 0.1:  # after a stall, drop missed slots
-                        next_emit = now
-                    while next_emit <= now:
-                        self.frames_ready.emit(cur[0], cur[1], self._seek_gen)
-                        next_emit += 1.0 / _FPS
-                else:
-                    next_emit = now
+                # Emit only when the decode thread produced a *new* tick (a fresh
+                # tuple). The old loop re-emitted the held frame on a 30 fps grid
+                # regardless of decode progress; on 4K, decode manages only a few
+                # ticks/s, so that flooded the GUI thread (QueuedConnection) with
+                # ~30 identical frame events/s. The backlog grows unbounded ->
+                # climbing RAM and a frozen UI. Re-drawing the same pixmap buys
+                # nothing: the QLabel already shows it. Emit rate now tracks
+                # decode rate, so a slow decoder degrades motion instead of
+                # drowning the event loop.
+                if self._playing and cur is not None and cur is not last:
+                    self.frames_ready.emit(cur[0], cur[1], self._seek_gen)
+                    last = cur
                 QThread.msleep(1)
         finally:
             self._stop = True
@@ -121,7 +131,6 @@ class VideoGroupWorker(QObject):
         offsets: list[float] = []
         t0 = 0.0
         base_idx = 0  # group tick index playback started from
-        behind = False  # decode fell behind the clock -> "loading" shown
 
         try:
             while not self._stop:
@@ -167,7 +176,6 @@ class VideoGroupWorker(QObject):
                                 self.frames_ready.emit(*self._latest, self._seek_gen)
                             self.loading_changed.emit(False)
                         t0, base_idx = time.perf_counter(), group.position if group else 0
-                        behind = False
 
                     elif op == "update_offsets":
                         new = list(cmd[1])
@@ -180,7 +188,6 @@ class VideoGroupWorker(QObject):
                     elif op == "play":
                         self._playing = True
                         t0, base_idx = time.perf_counter(), group.position if group else 0
-                        behind = False
 
                     elif op == "pause":
                         self._playing = False
@@ -193,9 +200,6 @@ class VideoGroupWorker(QObject):
                     break
 
                 if not self._playing or group is None:
-                    if behind:
-                        behind = False
-                        self.loading_changed.emit(False)
                     try:
                         self._cmds.put(self._cmds.get(timeout=0.05))
                     except queue.Empty:
@@ -203,26 +207,17 @@ class VideoGroupWorker(QObject):
                     continue
 
                 # Decode toward the wall-clock tick, one step per loop, never
-                # ahead of the clock. Blocking here is fine — the emit loop runs
-                # independently and re-emits the last frame while we wait.
+                # ahead of the clock. When decode can't hit real-time (heavy 4K),
+                # position simply trails disp_tick and playback runs in slow
+                # motion — no "loading" overlay: frames are advancing, the
+                # display just isn't real-time. The overlay is reserved for true
+                # blocking (a seek), emitted around seek_to_index above.
                 now = time.perf_counter()
                 disp_tick = base_idx + round((now - t0) * _FPS)
                 if disp_tick >= group.num_steps and group.position >= group.num_steps:
                     self._playing = False
                     self.eof_reached.emit()
                     continue
-
-                # Signal "loading" when decode trails the clock: the emit loop is
-                # re-showing a stale frame (playback slower than real-time). Clear
-                # it once decode catches back up. Hysteresis + the GUI's 150 ms
-                # debounce keep brief jitter from flashing the overlay.
-                drift = disp_tick - group.position
-                if behind and drift <= 1:
-                    behind = False
-                    self.loading_changed.emit(False)
-                elif not behind and drift >= 4:
-                    behind = True
-                    self.loading_changed.emit(True)
 
                 if group.position <= disp_tick and group.position < group.num_steps:
                     tick = group.next_tick()
