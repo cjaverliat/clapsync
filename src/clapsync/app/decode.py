@@ -63,7 +63,7 @@ def load_audio(
         RuntimeError: If the ffmpeg binary is unavailable or decoding fails.
     """
     path = Path(path)
-    key = _cache_key(path, target_rate)
+    key = _content_key(path, target_rate)
 
     cached = _cache_load(key)
     if cached is not None:
@@ -146,7 +146,9 @@ def _decode_with_ffmpeg(
 
     if not buf:
         raise ValueError(f"no audio samples decoded from {path}")
-    samples = np.frombuffer(bytes(buf), dtype=np.float32)
+    # frombuffer views the bytearray; the single .copy() detaches it, so the
+    # waveform is materialized once instead of twice.
+    samples = np.frombuffer(buf, dtype=np.float32)
     wave = torch.from_numpy(samples.copy()).unsqueeze(0)  # (1, N)
 
     peak = wave.abs().max()
@@ -165,11 +167,16 @@ def _cache_dir(kind: str = "audio-cache") -> Path:
     return directory
 
 
-def _cache_key(path: Path, target_rate: int | None) -> str:
-    """Content-addressed key: any edit to the file (mtime/size) invalidates it."""
+def _content_key(path: Path, *extras: object) -> str:
+    """Content-addressed key: any edit to the file (mtime/size) invalidates it.
+
+    ``extras`` fold decode parameters into the key so e.g. the same file at
+    two target rates caches separately.
+    """
     st = path.stat()
-    raw = f"{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{target_rate}"
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    parts = [str(path.resolve()), str(st.st_mtime_ns), str(st.st_size)]
+    parts += [str(e) for e in extras]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
 def _cache_load(key: str) -> tuple[torch.Tensor, int] | None:
@@ -227,7 +234,8 @@ def ensure_preview_proxy(
             progress(1.0)
         return path
 
-    proxy = _cache_dir("video-cache") / f"{_proxy_key(path)}.mp4"
+    key = _content_key(path, _PREVIEW_HEIGHT, _PREVIEW_FPS, _PROXY_VERSION)
+    proxy = _cache_dir("video-cache") / f"{key}.mp4"
     if proxy.exists():
         if progress is not None:
             progress(1.0)
@@ -235,16 +243,6 @@ def ensure_preview_proxy(
 
     _transcode_preview_proxy(path, proxy, info.duration, progress)
     return proxy
-
-
-def _proxy_key(path: Path) -> str:
-    """Content-addressed key: any edit to the file (mtime/size) invalidates it."""
-    st = path.stat()
-    raw = (
-        f"{path.resolve()}|{st.st_mtime_ns}|{st.st_size}"
-        f"|{_PREVIEW_HEIGHT}|{_PREVIEW_FPS}|{_PROXY_VERSION}"
-    )
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 def _transcode_preview_proxy(

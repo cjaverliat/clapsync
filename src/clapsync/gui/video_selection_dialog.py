@@ -18,20 +18,17 @@ from PySide6.QtWidgets import (
 
 
 class VideoSelectionDialog(QDialog):
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        title: str = "clapsync — Select Videos",
-        description: str = "Select two or more video files to synchronize:",
-    ) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(title)
+        self.setWindowTitle("clapsync — Select Videos")
         self.setMinimumSize(560, 380)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
-        layout.addWidget(QLabel(description))
+        layout.addWidget(
+            QLabel("Select two or more video files to synchronize:")
+        )
 
         list_row = QHBoxLayout()
 

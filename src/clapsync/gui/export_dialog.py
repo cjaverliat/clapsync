@@ -21,7 +21,8 @@ from clapsync.app.media import MediaInfo
 logger = logging.getLogger(__name__)
 
 
-def _fmt(s: float) -> str:
+def fmt_time(s: float) -> str:
+    """Seconds → ``m:ss.mmm`` label (shared by the editor and this dialog)."""
     m = int(s) // 60
     sec = s - m * 60
     return f"{m}:{sec:06.3f}"
@@ -51,8 +52,8 @@ class ExportDialog(QDialog):
         duration = trim_end - trim_start
         summary = (
             f"{len(video_infos)} video(s) — "
-            f"trim: {_fmt(trim_start)} → {_fmt(trim_end)} "
-            f"(duration: {_fmt(duration)})"
+            f"trim: {fmt_time(trim_start)} → {fmt_time(trim_end)} "
+            f"(duration: {fmt_time(duration)})"
         )
         layout.addWidget(QLabel(summary))
 

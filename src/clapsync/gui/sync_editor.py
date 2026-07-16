@@ -26,18 +26,12 @@ from PySide6.QtWidgets import (
 from clapsync.app import ExportResult, ExportSettings
 from clapsync.app.media import MediaInfo, probe
 from clapsync.core import TimeRange
-from clapsync.gui.export_dialog import ExportDialog
+from clapsync.gui.export_dialog import ExportDialog, fmt_time
 from clapsync.gui.video_player import VideoPlayerWidget, VideoGroupWorker
 from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
 from clapsync.gui.workers import ExportWorker
 
 logger = logging.getLogger(__name__)
-
-
-def _fmt(s: float) -> str:
-    m = int(s) // 60
-    sec = s - m * 60
-    return f"{m}:{sec:06.3f}"
 
 
 class _MosaicContainer(QWidget):
@@ -276,7 +270,9 @@ class SyncEditorWindow(QMainWindow):
         self._group_thread = None
 
     def _update_time_label(self, current: float) -> None:
-        self._time_label.setText(f"{_fmt(current)} / {_fmt(self._trim_end)}")
+        self._time_label.setText(
+            f"{fmt_time(current)} / {fmt_time(self._trim_end)}"
+        )
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -308,16 +304,26 @@ class SyncEditorWindow(QMainWindow):
             if not self._is_playing and self._group_worker is not None:
                 self._group_worker.cmd("pause")
 
+    def _restart_from_trim_start(self) -> None:
+        """Loop: seek every track back to the trim start and resume."""
+        self._sync_seek_all(self._trim_start)
+        self._global_pos = self._trim_start
+        if self._group_worker is not None:
+            self._group_worker.cmd("play")
+
+    def _stop_playback(self) -> None:
+        """Stop: pause the worker (a no-op at EOF) and reset the play button."""
+        self._is_playing = False
+        if self._group_worker is not None:
+            self._group_worker.cmd("pause")
+        self._play_btn.setText("▶  Play")
+
     @Slot()
     def _on_eof(self) -> None:
         if self._is_playing and self._loop_checkbox.isChecked():
-            self._sync_seek_all(self._trim_start)
-            self._global_pos = self._trim_start
-            if self._group_worker is not None:
-                self._group_worker.cmd("play")
+            self._restart_from_trim_start()
             return
-        self._is_playing = False
-        self._play_btn.setText("▶  Play")
+        self._stop_playback()
         logger.debug("SyncEditorWindow: EOF — playback stopped")
 
     @Slot()
@@ -388,15 +394,9 @@ class SyncEditorWindow(QMainWindow):
         self._update_time_label(global_s)
         if self._is_playing and global_s >= self._trim_end - 0.05:
             if self._loop_checkbox.isChecked():
-                self._sync_seek_all(self._trim_start)
-                self._global_pos = self._trim_start
-                if self._group_worker is not None:
-                    self._group_worker.cmd("play")
+                self._restart_from_trim_start()
             else:
-                self._is_playing = False
-                if self._group_worker is not None:
-                    self._group_worker.cmd("pause")
-                self._play_btn.setText("▶  Play")
+                self._stop_playback()
 
     @Slot()
     def _on_export(self) -> None:
