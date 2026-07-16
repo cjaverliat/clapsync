@@ -8,7 +8,6 @@ import av
 import numpy as np
 import torch
 from framepipe import IndexedFramePrefetcher, PyAvVideoDecoder
-from framepipe.metadata import extract_video_metadata
 
 # Progress is reported at most once per this fraction of a file. A 218 s GoPro
 # clip decodes to ~10k AAC frames; calling back on each one costs real time and
@@ -100,30 +99,44 @@ def decode_frames_at(
     if not seconds:
         raise ValueError("decode_frames_at needs at least one timestamp")
 
-    pts = extract_video_metadata(str(path)).pts  # (num_frames,) seconds, CPU
-    wanted = torch.tensor(seconds, dtype=pts.dtype).clamp_(
-        float(pts[0]), float(pts[-1])
-    )
-    # last frame with pts <= t, matching torchcodec's get_frames_played_at
-    idx = (torch.searchsorted(pts, wanted, right=True) - 1).clamp_(0, len(pts) - 1)
+    # Construct the decoder first and read its metadata (one probe), instead
+    # of probing separately here and letting PyAvVideoDecoder._open probe
+    # again. This also lets us drop the `start_frame` seek-before-open below:
+    # IndexedFramePrefetcher seeks by itself on large forward gaps.
+    decoder = PyAvVideoDecoder(str(path), device=device, batch_size=1)
+    try:
+        pts = decoder.metadata.pts  # (num_frames,) seconds, CPU
+        # framepipe's pts is 0-based for CFR but stream-absolute (includes
+        # stream.start_time) for VFR. Normalize both to a 0-based, source-
+        # relative timeline so caller timestamps (which are source-relative)
+        # map correctly regardless of container/framerate mode. No-op for
+        # CFR, where pts[0] is already 0.
+        pts = pts - pts[0]
+        wanted = torch.tensor(seconds, dtype=pts.dtype).clamp_(
+            float(pts[0]), float(pts[-1])
+        )
+        # last frame with pts <= t, matching torchcodec's get_frames_played_at
+        idx = (torch.searchsorted(pts, wanted, right=True) - 1).clamp_(
+            0, len(pts) - 1
+        )
 
-    # The prefetcher consumes a forward-ordered plan; sort, then invert back to
-    # caller order so unordered/duplicate timestamps behave.
-    order = torch.argsort(idx)
-    plan = idx[order].tolist()
+        # The prefetcher consumes a forward-ordered plan; sort, then invert
+        # back to caller order so unordered/duplicate timestamps behave.
+        order = torch.argsort(idx)
+        plan = idx[order].tolist()
 
-    decoder = PyAvVideoDecoder(
-        str(path), device=device, batch_size=1, start_frame=int(plan[0]),
-    )
-    # Nested with: if IndexedFramePrefetcher's constructor raises, `decoder`
-    # is still closed here. On the normal path close_decoder=True (the
-    # default) has the prefetcher close it too, but VideoDecoder.close() is
-    # idempotent, so this is not a double-close.
-    with decoder:
         batches = []
         with IndexedFramePrefetcher(decoder, plan) as stream:
             while (batch := stream.next_batch()) is not None:
                 batches.append(batch.frames)
+    except Exception:
+        # If IndexedFramePrefetcher's constructor (or anything above) raises
+        # before it takes ownership of `decoder`, nothing else will close it
+        # — close it here. On the normal path the prefetcher's context
+        # manager already closed it (close_decoder=True, the default), but
+        # VideoDecoder.close() is idempotent, so this is never a double-close.
+        decoder.close()
+        raise
 
     frames = torch.cat(batches, dim=0)
     return frames[torch.argsort(order)]

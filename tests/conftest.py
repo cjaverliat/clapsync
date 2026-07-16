@@ -156,6 +156,65 @@ def frame_index(frame: torch.Tensor) -> int:
 
 
 @pytest.fixture
+def vfr_video_with_offset(tmp_path: Path):
+    """Factory: write a VFR video with a nonzero stream start_time.
+
+    Frame i is a solid gray level of i * _INDEXED_STEP (see `indexed_video`),
+    so decoded frames are identifiable by content. Unlike `indexed_video`
+    (CFR), this fixture assigns each frame an explicit pts on an explicit
+    time_base: the first half is spaced uniformly (10 fps) and the second
+    half uses growing, non-uniform deltas, so PyAV's guessed frame rate
+    diverges from the declared average rate and
+    `extract_video_metadata(...).is_vfr` is True. All pts are offset by
+    `start_seconds`, so `pts[0] != 0` — the combination (VFR + nonzero
+    start_time) is what makes framepipe's metadata.pts stream-absolute
+    instead of 0-based (see framepipe.metadata.extract_video_metadata), which
+    is the case decode_frames_at must normalize.
+    """
+
+    def _make(n: int = 8, w: int = 64, h: int = 48, name: str = "vfr_off.mp4",
+              start_seconds: float = 5.0):
+        assert n * _INDEXED_STEP <= 255, "index encoding would wrap"
+        assert n >= 4, "need at least two frames per half"
+        path = tmp_path / name
+        time_base = Fraction(1, 90000)
+        start_pts = round(start_seconds / time_base)
+        half = n // 2
+        # First half: uniform 0.1 s spacing (nominal 10 fps). Second half:
+        # growing deltas, so the actual frame timing is not periodic.
+        deltas = [9000] * (half - 1)
+        deltas += [9000 + 4500 * (k + 1) for k in range(n - half)]
+        pts_ticks = [start_pts]
+        for d in deltas:
+            pts_ticks.append(pts_ticks[-1] + d)
+
+        frames = torch.zeros((n, 3, h, w), dtype=torch.uint8)
+        for i in range(n):
+            frames[i] = i * _INDEXED_STEP
+
+        with av.open(str(path), mode="w") as container:
+            stream = container.add_stream("libx264", rate=Fraction(10))
+            stream.width = w
+            stream.height = h
+            stream.pix_fmt = "yuv420p"
+            stream.time_base = time_base
+            stream.codec_context.time_base = time_base
+            for i in range(n):
+                rgb = np.ascontiguousarray(frames[i].permute(1, 2, 0).numpy())
+                frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+                frame.pts = pts_ticks[i]
+                frame.time_base = time_base
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+
+        return path, n, w, h, [t * float(time_base) for t in pts_ticks]
+
+    return _make
+
+
+@pytest.fixture
 def av_video(tmp_path: Path):
     """Factory: write a muxed audio+video file, return (path, fps, n, w, h, sr)."""
 
