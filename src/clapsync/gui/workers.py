@@ -13,9 +13,10 @@ from clapsync.app import (
     ExportResult,
     ExportSettings,
     compute_sync_offsets,
-    export_tracks,
 )
 from clapsync.app.decode import ensure_preview_proxy
+from clapsync.app.export import export_media
+from clapsync.app.media import probe
 
 logger = logging.getLogger(__name__)
 
@@ -228,17 +229,35 @@ class ExportWorker(QObject):
     @Slot()
     def run(self) -> None:
         n = len(self._paths)
+        plural = "s" if n != 1 else ""
+
+        # Probe first so the dialog names this phase instead of a vague
+        # "Preparing…": on-disk metadata reads, no encoding yet.
+        self.status.emit(f"Probing {n} source file{plural}…")
+        media = [probe(p) for p in self._paths]
+        if self._cancelled:
+            self.finished.emit([])
+            return
+
+        self.status.emit(f"Exporting — 0/{n} tracks done, estimating…")
+        start = time.monotonic()
 
         def _on_progress(frac: float) -> None:
-            # export_tracks reports (i+1)/n after each track; derive the
-            # current item index so the dialog shows "Exporting i/n" — the
-            # core API exposes only a float callback, not a status string.
+            # export_media reports (i+1)/n after each track; there's no
+            # sub-track signal, so the ETA is a linear extrapolation of the
+            # per-track wall time and updates only on track boundaries.
             self.progress.emit(frac)
             done = min(n, max(1, math.ceil(frac * n)))
-            self.status.emit(f"Exporting {done}/{n}")
+            if 0.0 < frac < 1.0:
+                eta = (time.monotonic() - start) * (1.0 - frac) / frac
+                self.status.emit(
+                    f"Exporting — {done}/{n} tracks done  (ETA {_fmt_eta(eta)})"
+                )
+            else:
+                self.status.emit(f"Exporting — {done}/{n} tracks done")
 
-        results = export_tracks(
-            self._paths,
+        results = export_media(
+            media,
             self._offsets,
             self._settings,
             progress=_on_progress,

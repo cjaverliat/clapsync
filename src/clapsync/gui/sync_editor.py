@@ -427,7 +427,9 @@ class SyncEditorWindow(QMainWindow):
             QMessageBox.warning(self, "Export", f"Directory does not exist: {output_dir}")
             return
 
-        progress_dialog = QProgressDialog("Preparing…", "Cancel", 0, 1000, self)
+        progress_dialog = QProgressDialog(
+            "Probing source files…", "Cancel", 0, 1000, self
+        )
         progress_dialog.setWindowTitle("Export Progress")
         progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         progress_dialog.setAutoClose(False)
