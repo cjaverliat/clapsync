@@ -5,13 +5,22 @@ import functools
 import logging
 import tempfile
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Literal
 
+import av
+import numpy as np
 import torch
 
-from clapsync.app.decode import decode_frames_at, load_audio
-from clapsync.app.encode import encode_clip
+from clapsync.app.decode import load_audio
+from clapsync.app.encode import (
+    _AUDIO_BLOCK,
+    _audio_codec_for,
+    _quality_options,
+    encode_clip,
+    pick_video_codec,
+)
 from clapsync.app.media import MediaInfo, probe
 from clapsync.app.sync import offsets_from_media
 from clapsync.core.offsets import Refine
@@ -115,57 +124,218 @@ def frame_source_times(
     return [trim.start + k / out_fps - offset for k in range(n_frames)]
 
 
-def _build_video_frames(
+def _video_filter_chain(
+    window: tuple[float, float, float, float],
+    out_w: int,
+    out_h: int,
+    out_fps: float,
+    native_size: bool,
+    native_fps: bool,
+) -> str:
+    """Build the libavfilter chain that trims, retimes, resizes and pads a track.
+
+    ``trim`` selects the in-source span; ``setpts`` rebases it to a 0-based
+    output timeline while subtracting the exact (fractional) local start, so the
+    sub-frame offset is preserved as real PTS rather than snapped to a frame.
+    ``scale``/``fps`` are omitted on the native fast path (just trim + pad),
+    and ``tpad`` fills the black gaps outside the source.
+    """
+    local_start, local_end, pad_start, pad_end = window
+    parts = [
+        f"trim=start={local_start:.6f}:end={local_end:.6f}",
+        f"setpts=PTS-{local_start:.6f}/TB",
+    ]
+    if not native_size:
+        parts.append(f"scale={out_w}:{out_h}")
+    if not native_fps:
+        parts.append(f"fps={out_fps}")
+    if pad_start > 1e-6 or pad_end > 1e-6:
+        parts.append(
+            f"tpad=start_duration={pad_start:.6f}"
+            f":stop_duration={pad_end:.6f}:color=black"
+        )
+    return ",".join(parts)
+
+
+def _stream_encode_video(
+    container: av.container.OutputContainer,
+    vstream: av.stream.Stream,
+    info: MediaInfo,
+    window: tuple[float, float, float, float],
+    out_w: int,
+    out_h: int,
+    out_fps: float,
+    native_size: bool,
+    native_fps: bool,
+) -> None:
+    """Decode → filter → encode one video track into ``vstream``.
+
+    Frames flow one at a time through a libavfilter graph and out to the
+    encoder, so peak memory is a handful of frames regardless of clip length —
+    unlike decoding the whole clip into a tensor first. The source is seeked to
+    the keyframe at/before the trim start so a late trim doesn't decode from 0.
+    ``vstream`` must already be added to ``container`` (with any audio stream)
+    before muxing begins, or the container header is finalized without them.
+    """
+    local_start = window[0]
+
+    with av.open(str(info.path)) as source:
+        istream = source.streams.video[0]
+        istream.thread_type = "AUTO"
+        if local_start > 0:
+            source.seek(
+                round(local_start / istream.time_base),
+                stream=istream,
+                backward=True,
+            )
+
+        graph = av.filter.Graph()
+        # Explicit buffer args (not template=): tpad needs a frame_rate to know
+        # how many black frames a pad duration is; a template buffer omits it,
+        # silently dropping the pad.
+        source_fps = Fraction(info.fps or out_fps).limit_denominator(65535)
+        buffer = graph.add(
+            "buffer",
+            f"width={istream.codec_context.width}"
+            f":height={istream.codec_context.height}"
+            f":pix_fmt={istream.codec_context.format.name}"
+            f":time_base={istream.time_base}"
+            f":frame_rate={source_fps}",
+        )
+        node = buffer
+        for spec in _video_filter_chain(
+            window, out_w, out_h, out_fps, native_size, native_fps
+        ).split(","):
+            name, _, args = spec.partition("=")
+            step = graph.add(name, args or None)
+            node.link_to(step)
+            node = step
+        sink = graph.add("buffersink")
+        node.link_to(sink)
+        graph.configure()
+
+        def drain() -> None:
+            while True:
+                try:
+                    out_frame = sink.pull()
+                except (av.error.BlockingIOError, av.error.EOFError):
+                    return
+                for packet in vstream.encode(out_frame):
+                    container.mux(packet)
+
+        try:
+            for frame in source.decode(istream):
+                try:
+                    buffer.push(frame)
+                except av.error.EOFError:
+                    break  # trim end reached; graph closed the stream
+                drain()
+        finally:
+            try:
+                buffer.push(None)
+            except av.error.EOFError:
+                pass
+            drain()
+            for packet in vstream.encode():
+                container.mux(packet)
+
+
+def _mux_waveform_audio(
+    container: av.container.OutputContainer,
+    astream: av.stream.Stream,
+    layout: str,
+    audio: torch.Tensor,
+    rate: int,
+) -> None:
+    """Mux the pre-trimmed waveform (small, already in memory) into ``astream``."""
+    resampler = av.AudioResampler(
+        format=astream.codec_context.format.name, layout=layout, rate=rate
+    )
+    samples = audio.cpu().numpy().astype(np.float32)
+    pts = 0
+    for start in range(0, samples.shape[1], _AUDIO_BLOCK):
+        block = np.ascontiguousarray(samples[:, start : start + _AUDIO_BLOCK])
+        frame = av.AudioFrame.from_ndarray(block, format="fltp", layout=layout)
+        frame.sample_rate = rate
+        frame.pts = pts
+        pts += block.shape[1]
+        for resampled in resampler.resample(frame):
+            for packet in astream.encode(resampled):
+                container.mux(packet)
+    for resampled in resampler.resample(None):
+        for packet in astream.encode(resampled):
+            container.mux(packet)
+    for packet in astream.encode():
+        container.mux(packet)
+
+
+def _export_video_track(
     info: MediaInfo,
     offset: float,
     trim: TimeRange,
-    out_fps: float,
-    out_w: int,
-    out_h: int,
-) -> torch.Tensor:
-    """Assemble the output frame tensor on the trim grid, black-padding gaps.
+    settings: ExportSettings,
+    out_path: Path,
+    device: str,
+) -> None:
+    """Stream one synced video track (+audio) to ``out_path`` at flat memory.
 
-    Frames are assembled on CPU (uniform device for stacking); encode_clip moves
-    the batch to the encode device.
-
-    Args:
-        info: Probed source track.
-        offset: Track offset on the shared timeline (seconds).
-        trim: Output range on the shared timeline.
-        out_fps: Output frame rate.
-        out_w: Output width in pixels.
-        out_h: Output height in pixels.
-
-    Returns:
-        uint8 tensor of shape (N, 3, out_h, out_w) on CPU.
+    Video is trimmed/retimed/resized/padded by a libavfilter graph and encoded
+    frame-by-frame; when the output matches the source resolution and fps the
+    scale/fps stages are dropped (a plain trim, sub-frame alignment intact).
+    Audio is the already-trimmed waveform, muxed alongside. NVENC failures fall
+    back to CPU libx264 unless a codec was pinned.
     """
-    times = frame_source_times(offset, trim, out_fps)
-    in_range = [0.0 <= t < info.duration for t in times]
-    wanted_idx = [k for k, ok in enumerate(in_range) if ok]
-    decoded_by_idx: dict[int, torch.Tensor] = {}
-    if wanted_idx:
-        decoded = decode_frames_at(
-            info.path, [times[k] for k in wanted_idx], device="cpu",
-        )
-        for k, frame in zip(wanted_idx, decoded):
-            decoded_by_idx[k] = frame
+    out_fps = settings.output_fps or info.fps or 30.0
+    out_w = settings.target_width or info.width
+    out_h = settings.target_height or info.height
+    native_size = out_w == info.width and out_h == info.height
+    native_fps = abs(out_fps - (info.fps or out_fps)) < 1e-3
+    window = clip_window(offset, info.duration, trim)
+    audio = None
+    rate = None
+    if info.has_audio:
+        audio, rate = _build_audio_samples(info, offset, trim)
 
-    black = torch.zeros((3, out_h, out_w), dtype=torch.uint8)
-    frames = []
-    for k, ok in enumerate(in_range):
-        if not ok:
-            frames.append(black)
-            continue
-        frame = decoded_by_idx[k]
-        if frame.shape[-1] != out_w or frame.shape[-2] != out_h:
-            frame = torch.nn.functional.interpolate(
-                frame.unsqueeze(0).float(),
-                size=(out_h, out_w),
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0).clamp(0, 255).to(torch.uint8)
-        frames.append(frame)
-    return torch.stack(frames)
+    def write(codec: str) -> None:
+        with av.open(str(out_path), mode="w") as container:
+            # Add every stream before muxing any packet — the first mux
+            # finalizes the container header, and a stream added afterward gets
+            # no time_base (mux then raises "Cannot rebase to zero time").
+            vstream = container.add_stream(
+                codec, rate=Fraction(out_fps).limit_denominator(65535)
+            )
+            vstream.width = out_w
+            vstream.height = out_h
+            vstream.pix_fmt = "yuv420p"
+            vstream.options = _quality_options(codec, settings.crf)
+
+            astream = None
+            layout = None
+            if audio is not None:
+                layout = "mono" if audio.shape[0] == 1 else "stereo"
+                astream = container.add_stream(
+                    _audio_codec_for(out_path), rate=rate, layout=layout
+                )
+
+            _stream_encode_video(
+                container, vstream, info, window, out_w, out_h, out_fps,
+                native_size, native_fps,
+            )
+            if astream is not None:
+                _mux_waveform_audio(container, astream, layout, audio, rate)
+
+    codec = settings.video_codec or pick_video_codec(device)
+    try:
+        write(codec)
+    except Exception as exc:  # noqa: BLE001
+        # NVENC can reject a clip (e.g. below its minimum resolution). Fall back
+        # to CPU libx264 unless the caller pinned a codec.
+        if not str(device).startswith("cuda") or settings.video_codec is not None:
+            raise
+        logger.warning(
+            "GPU encode failed for %s (%s) — retrying on CPU", info.path, exc
+        )
+        write("libx264")
 
 
 def _build_audio_samples(
@@ -216,38 +386,10 @@ def export_media(
             break
         try:
             if info.kind == "video":
-                out_fps = settings.output_fps or info.fps or 30.0
-                out_w = settings.target_width or info.width
-                out_h = settings.target_height or info.height
-                frames = _build_video_frames(
-                    info, offset, trim, out_fps, out_w, out_h,
+                out_path = settings.output_dir / f"{info.path.stem}_synced.mp4"
+                _export_video_track(
+                    info, offset, trim, settings, out_path, device,
                 )
-                audio = None
-                rate = None
-                if info.has_audio:
-                    audio, rate = _build_audio_samples(info, offset, trim)
-                ext = "mp4"
-                out_path = settings.output_dir / f"{info.path.stem}_synced.{ext}"
-                try:
-                    encode_clip(
-                        out_path, frames, out_fps, audio, rate,
-                        video_codec=settings.video_codec, crf=settings.crf,
-                        device=device,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # NVENC can still reject an individual clip (e.g. below its
-                    # minimum resolution). Fall back to CPU libx264 for this
-                    # clip unless the caller pinned a specific codec.
-                    if device != "cuda" or settings.video_codec is not None:
-                        raise
-                    logger.warning(
-                        "GPU encode failed for %s (%s) — retrying on CPU",
-                        info.path, exc,
-                    )
-                    encode_clip(
-                        out_path, frames, out_fps, audio, rate,
-                        video_codec="libx264", crf=settings.crf, device="cpu",
-                    )
             else:
                 audio, rate = _build_audio_samples(info, offset, trim)
                 ext = (

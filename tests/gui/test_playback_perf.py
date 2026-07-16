@@ -94,7 +94,11 @@ def test_playback_sustains_30fps(tmp_path, label, w, h, gate) -> None:
     paths = [clip] * TRACKS
 
     qapp = QApplication.instance() or QApplication([])
-    win = SyncEditorWindow(paths, [0.0] * TRACKS)
+    # use_proxies mirrors real high-res usage: sources above 1080p are played
+    # via a 480p/30fps proxy (1080p and below pass through). Without it, a raw
+    # 6x4K mosaic is decode-bound and cannot sustain the rate — that is the
+    # whole reason proxies exist, not a playback regression.
+    win = SyncEditorWindow(paths, [0.0] * TRACKS, use_proxies=True)
     win.resize(1600, 900)
     win.show()
 

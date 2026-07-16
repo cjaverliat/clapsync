@@ -14,6 +14,8 @@ import numpy as np
 import torch
 from framepipe import IndexedFramePrefetcher, PyAvVideoDecoder
 
+from clapsync.app import media
+
 logger = logging.getLogger(__name__)
 
 # Progress is reported at most once per this fraction of a file, so a long clip
@@ -23,6 +25,16 @@ _PROGRESS_STEP = 0.01
 # clip yields many progress ticks; large enough that a 12 min clip is a few
 # hundred reads, not thousands.
 _READ_CHUNK = 1 << 16
+# Preview proxy policy. Sources at or below _PROXY_SOURCE_MAX_HEIGHT already
+# decode in real time across a mosaic (1080p measured at ~3.4x), so they play
+# as-is; taller ones (e.g. 5.3K GoPro) are transcoded once to a light
+# _PREVIEW_HEIGHT/_PREVIEW_FPS proxy and cached.
+_PROXY_SOURCE_MAX_HEIGHT = 1080
+_PREVIEW_HEIGHT = 480
+_PREVIEW_FPS = 30
+# Bumped whenever the transcode parameters change, so proxies cached under the
+# old settings are regenerated instead of served stale.
+_PROXY_VERSION = 4
 
 
 def load_audio(
@@ -144,12 +156,12 @@ def _decode_with_ffmpeg(
     return wave.contiguous()
 
 
-def _cache_dir() -> Path:
-    """Per-user cache directory for decoded waveforms."""
+def _cache_dir(kind: str = "audio-cache") -> Path:
+    """Per-user cache directory for decoded media (waveforms, preview proxies)."""
     base = os.environ.get("LOCALAPPDATA") or os.path.join(
         os.path.expanduser("~"), ".cache"
     )
-    directory = Path(base) / "clapsync" / "audio-cache"
+    directory = Path(base) / "clapsync" / kind
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -246,3 +258,141 @@ def decode_frames_at(
 
     frames = torch.cat(batches, dim=0)
     return frames[torch.argsort(order)]
+
+
+def ensure_preview_proxy(
+    path: Path, progress: Callable[[float], None] | None = None
+) -> Path:
+    """Return a 480p/30fps proxy of ``path``, transcoding+caching on first use.
+
+    High-resolution source (e.g. 5.3K 60fps GoPro HEVC) decodes far too slowly
+    to sustain real-time multi-track mosaic preview. A one-time single-process
+    ffmpeg transcode (GPU decode -> GPU scale -> GPU encode; no frame ever
+    crosses into Python) produces a light proxy that plays with headroom. The
+    proxy is cached on disk keyed by (path, mtime, size), so later opens return
+    it instantly.
+
+    Sources at or below 1080p already play in real time, so they are returned
+    unchanged; only taller footage is proxied.
+
+    Args:
+        path: Source video path.
+        progress: Optional 0..1 callback reporting the transcode fraction.
+
+    Returns:
+        Path to a playable proxy, or ``path`` itself when no proxy is needed.
+
+    Raises:
+        RuntimeError: If ffmpeg is unavailable or transcoding fails.
+    """
+    path = Path(path)
+    info = media.probe(path)
+    if info.kind != "video" or (info.height or 0) <= _PROXY_SOURCE_MAX_HEIGHT:
+        if progress is not None:
+            progress(1.0)
+        return path
+
+    proxy = _cache_dir("video-cache") / f"{_proxy_key(path)}.mp4"
+    if proxy.exists():
+        if progress is not None:
+            progress(1.0)
+        return proxy
+
+    _transcode_preview_proxy(path, proxy, info.duration, progress)
+    return proxy
+
+
+def _proxy_key(path: Path) -> str:
+    """Content-addressed key: any edit to the file (mtime/size) invalidates it."""
+    st = path.stat()
+    raw = (
+        f"{path.resolve()}|{st.st_mtime_ns}|{st.st_size}"
+        f"|{_PREVIEW_HEIGHT}|{_PREVIEW_FPS}|{_PROXY_VERSION}"
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _transcode_preview_proxy(
+    path: Path,
+    proxy: Path,
+    duration: float,
+    progress: Callable[[float], None] | None,
+) -> None:
+    """Transcode ``path`` into a 480p/30fps proxy at ``proxy`` (atomically).
+
+    A single ffmpeg process does GPU decode, scale and encode. The CPU path is
+    tried only if the GPU pipeline fails to start (no NVDEC/NVENC). Output is
+    written to a temp file and renamed into place, so a killed transcode never
+    leaves a half-written proxy that a later run would treat as a cache hit.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg not found on PATH; cannot build preview proxy")
+
+    tmp = proxy.with_suffix(".partial.mp4")
+    enc = [
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an", "-progress", "pipe:1", "-nostats", str(tmp),
+    ]
+    head = [ffmpeg, "-nostdin", "-y", "-v", "error"]
+    # Encode with libx264, not NVENC: NVENC-produced streams intermittently fall
+    # back to *software* decode under PyAV's CUDA hwaccel, whereas libx264
+    # streams reliably NVDEC-decode across a mosaic. Decode+scale still run on
+    # the GPU (scale_cuda), so transcode stays decode-bound (same speed as
+    # all-NVENC); only the light 480p encode is on the CPU. bilinear scale is
+    # used over lanczos: it is ~2x faster on scale_cuda and the difference is
+    # slight once the display resamples again.
+    gpu = head + [
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", str(path),
+        "-vf",
+        f"scale_cuda=-2:{_PREVIEW_HEIGHT}:interp_algo=bilinear"
+        f",hwdownload,format=nv12,fps={_PREVIEW_FPS}",
+        *enc,
+    ]
+    # CPU fallback when no NVIDIA GPU is present: software decode/scale/encode.
+    cpu = head + [
+        "-i", str(path),
+        "-vf", f"scale=-2:{_PREVIEW_HEIGHT}:flags=bilinear,fps={_PREVIEW_FPS}",
+        *enc,
+    ]
+
+    if not _run_transcode(gpu, duration, progress):
+        if not _run_transcode(cpu, duration, progress):
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"ffmpeg failed to transcode preview proxy from {path}")
+    os.replace(tmp, proxy)
+    if progress is not None:
+        progress(1.0)
+
+
+def _run_transcode(
+    cmd: list[str],
+    duration: float,
+    progress: Callable[[float], None] | None,
+) -> bool:
+    """Run one ffmpeg transcode, driving ``progress`` from its ``-progress`` feed.
+
+    Returns True on a clean (exit 0) transcode, False otherwise, so the caller
+    can fall back to a software pipeline.
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+    )
+    last = -1.0
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        if progress is None or duration <= 0:
+            continue
+        key, _, value = line.strip().partition("=")
+        if key != "out_time_us":
+            continue
+        try:
+            seconds = int(value) / 1_000_000
+        except ValueError:
+            continue  # ffmpeg emits "N/A" before the first frame lands
+        fraction = min(seconds / duration, 1.0)
+        if fraction - last >= _PROGRESS_STEP:
+            progress(fraction)
+            last = fraction
+    return proc.wait() == 0

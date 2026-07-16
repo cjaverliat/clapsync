@@ -141,7 +141,11 @@ def compute_sync_offsets(
     for i, p in enumerate(paths):
         if status is not None:
             status(f"Probing files ({i + 1}/{len(paths)})…")
+        if progress is not None:
+            progress(i / len(paths))
         media.append(probe(p))
+    if progress is not None:
+        progress(1.0)  # probing done; the load phase reports its own 0..1
     return offsets_from_media(
         media, reference_index=reference_index, refine=refine,
         target_rate=target_rate, progress=progress, status=status,

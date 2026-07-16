@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -14,8 +15,18 @@ from clapsync.app import (
     compute_sync_offsets,
     export_tracks,
 )
+from clapsync.app.decode import ensure_preview_proxy
 
 logger = logging.getLogger(__name__)
+
+def _fmt_eta(seconds: float) -> str:
+    """Format a remaining-time estimate as ``m:ss`` (or ``h:mm:ss``)."""
+    total = max(0, int(seconds))
+    minutes, secs = divmod(total, 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 
 class OffsetWorker(QObject):
@@ -42,46 +53,91 @@ class OffsetWorker(QObject):
             self.failed.emit(str(exc))
 
 
-def compute_offsets_with_progress(
-    paths: list[Path], parent=None
-) -> list[float] | None:
-    """Run OffsetWorker on a QThread behind a modal progress dialog.
+class ProxyWorker(QObject):
+    """Pre-generates preview proxies sequentially so the timeline opens warm.
 
-    Args:
-        paths: Video file paths to analyze.
-        parent: Optional Qt parent widget for the dialog.
+    Transcodes run one at a time: proxy generation is bound by the single NVDEC
+    decode engine, so running several at once only time-slices it (and risks
+    VRAM exhaustion) for no throughput gain. Overall progress spans all files;
+    the status line carries a running ETA from elapsed time against it.
+    """
+
+    progress_value = Signal(int)  # 0..1000
+    status = Signal(str)
+    finished = Signal(list)  # list[Path] proxy paths (unused; warms the cache)
+    failed = Signal(str)
+
+    def __init__(self, paths: list[Path]) -> None:
+        super().__init__()
+        self._paths = paths
+        self._cancel = False
+
+    def cancel(self) -> None:
+        """Stop before the next file; an in-flight transcode still finishes."""
+        self._cancel = True
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            n = len(self._paths)
+            start = time.monotonic()
+            proxies = []
+            for index, path in enumerate(self._paths):
+                if self._cancel:
+                    break
+
+                def report(fraction: float, index: int = index) -> None:
+                    overall = (index + fraction) / n
+                    self.progress_value.emit(int(overall * 1000))
+                    elapsed = time.monotonic() - start
+                    # Withhold the ETA until there's enough signal to be useful.
+                    if overall > 0.02:
+                        eta = elapsed * (1.0 - overall) / overall
+                        self.status.emit(
+                            f"Generating preview proxy {index + 1}/{n}"
+                            f"  (ETA {_fmt_eta(eta)})"
+                        )
+                    else:
+                        self.status.emit(f"Generating preview proxy {index + 1}/{n}")
+
+                proxies.append(ensure_preview_proxy(path, progress=report))
+            self.finished.emit(proxies)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("proxy worker failed")
+            self.failed.emit(str(exc))
+
+
+def _run_with_progress(worker, title: str, parent):
+    """Drive a progress-reporting worker on a QThread behind a modal dialog.
+
+    The worker must expose ``progress_value(int 0..1000)``, ``status(str)``,
+    ``finished(object)`` and ``failed(str)`` and a ``run`` slot. Shared by the
+    offset and proxy pre-passes so both report progress identically.
 
     Returns:
-        Computed offsets, or None if cancelled or an error occurred.
+        ``(result, error)``: the finished payload (``error`` None) on success,
+        ``(None, message)`` on failure, or ``(None, None)`` if cancelled.
     """
     dialog = QProgressDialog("Preparing…", "Cancel", 0, 1000, parent)
-    dialog.setWindowTitle("Computing Offsets")
+    dialog.setWindowTitle(title)
     dialog.setMinimumWidth(420)
-    # Each per-file load ends at progress(1.0) -> value 1000. Left at the
-    # defaults the dialog would auto-reset and auto-hide on every file, so it
-    # flickers closed and reopens between "Loading audio (i/N)". Keep it up;
-    # it is dismissed when this function returns.
+    # Each per-file step ends at progress 1000. Left at the defaults the dialog
+    # would auto-reset and auto-hide on every file, flickering closed and
+    # reopening between "(i/N)" steps. Keep it up; dismissed on return.
     dialog.setAutoReset(False)
     dialog.setAutoClose(False)
     dialog.setValue(0)
     dialog.show()
 
-    result: list[float] | None = None
+    result = None
     error: str | None = None
 
-    worker = OffsetWorker(paths)
     thread = QThread()
     worker.moveToThread(thread)
 
-    def on_value(v: int) -> None:
-        dialog.setValue(v)
-
-    def on_status(msg: str) -> None:
-        dialog.setLabelText(msg)
-
-    def on_finished(offsets: list) -> None:
+    def on_finished(payload) -> None:
         nonlocal result
-        result = offsets
+        result = payload
         dialog.setValue(1000)
         thread.quit()
 
@@ -90,8 +146,8 @@ def compute_offsets_with_progress(
         error = msg
         thread.quit()
 
-    worker.progress_value.connect(on_value)
-    worker.status.connect(on_status)
+    worker.progress_value.connect(dialog.setValue)
+    worker.status.connect(dialog.setLabelText)
     worker.finished.connect(on_finished)
     worker.failed.connect(on_failed)
     thread.started.connect(worker.run)
@@ -100,17 +156,53 @@ def compute_offsets_with_progress(
     while thread.isRunning():
         QApplication.processEvents()
         if dialog.wasCanceled():
+            if hasattr(worker, "cancel"):
+                worker.cancel()
             thread.requestInterruption()
             thread.quit()
             thread.wait(3000)
-            return None
+            return None, None
     thread.wait()
 
     dialog.close()  # autoClose is off, so dismiss it explicitly
+    return result, error
+
+
+def compute_offsets_with_progress(
+    paths: list[Path], parent=None
+) -> list[float] | None:
+    """Compute sync offsets behind a modal progress dialog.
+
+    Returns:
+        Computed offsets, or None if cancelled or an error occurred.
+    """
+    result, error = _run_with_progress(
+        OffsetWorker(paths), "Computing Offsets", parent
+    )
     if error is not None:
         QMessageBox.critical(parent, "Error", f"Failed to compute offsets:\n{error}")
         return None
     return result
+
+
+def prepare_proxies_with_progress(paths: list[Path], parent=None) -> bool:
+    """Pre-generate preview proxies behind a modal progress dialog.
+
+    Warms the on-disk proxy cache so the timeline's decode thread opens each
+    track instantly instead of showing a black "Loading…" while it transcodes.
+
+    Returns:
+        True on success, False if cancelled or an error occurred.
+    """
+    result, error = _run_with_progress(
+        ProxyWorker(paths), "Generating Preview Proxies", parent
+    )
+    if error is not None:
+        QMessageBox.critical(
+            parent, "Error", f"Failed to generate preview proxies:\n{error}"
+        )
+        return False
+    return result is not None
 
 
 class ExportWorker(QObject):

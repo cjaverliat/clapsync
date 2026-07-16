@@ -58,12 +58,14 @@ class SyncEditorWindow(QMainWindow):
         video_paths: list[Path],
         offsets: list[float],
         output_dir: Path | None = None,
+        use_proxies: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("clapsync")
         self.resize(1200, 700)
 
+        self._use_proxies: bool = use_proxies
         self._video_infos: list[MediaInfo] = []
         self._offsets: list[float] = list(offsets)
         self._trim_start: float = 0.0
@@ -242,7 +244,7 @@ class SyncEditorWindow(QMainWindow):
 
         self._stop_group_worker()
 
-        worker = VideoGroupWorker()
+        worker = VideoGroupWorker(use_proxies=self._use_proxies)
         thread = QThread(self)
         worker.moveToThread(thread)
 

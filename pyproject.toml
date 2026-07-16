@@ -17,6 +17,10 @@ dependencies = [
 [project.optional-dependencies]
 app = ["av>=18", "framepipe @ git+https://github.com/cjaverliat/framepipe"]
 gui = ["clapsync[app]", "PySide6>=6.7,<6.8"]
+triton = [
+    "triton; sys_platform == 'linux'",
+    "triton-windows; sys_platform == 'win32'",
+]
 
 [project.scripts]
 clapsync = "clapsync.gui.app:main"
@@ -45,6 +49,17 @@ numpy = "*"
 av = "*"
 PySide6 = ">=6.7.0,<6.8"
 pytest = "*"
+
+# Triton distribution is per-platform: upstream on Linux, the woct0rdho fork on
+# Windows. Both expose "import triton". framepipe uses it for the fused NV12->RGB
+# decode kernel; without it the slower torch fallback runs. Version MUST track
+# the torch pin above: torch 2.11 -> upstream triton 3.5.0 (newer minors ->
+# alloca LNK2019 on Windows).
+[tool.pixi.target.linux-64.pypi-dependencies]
+triton = "*"  # torch pins this transitively on Linux
+
+[tool.pixi.target.win-64.pypi-dependencies]
+triton-windows = "==3.5.0.post21"
 
 [tool.pixi.dependencies]
 python = ">=3.10,<3.13"

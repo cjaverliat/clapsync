@@ -16,12 +16,12 @@ from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSizePolicy
 
-from framepipe import GroupFrame, PyAvVideoDecoder, Resize, TrackSpec, VideoGroupDecoder
+from framepipe import GroupFrame, PyAvVideoDecoder, TrackSpec, VideoGroupDecoder
 
-# Playback grid + preview downscale. All tracks resample to this fps and are
-# shrunk on the GPU to this longest edge before crossing to host memory.
+from clapsync.app.decode import ensure_preview_proxy
+
+# Global playback frame rate; every track resamples to this grid.
 _FPS = 30.0
-_MOSAIC_MAX_EDGE = 480
 # GPU-resident NVDEC decode when a CUDA device is present, else software decode.
 _DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -55,8 +55,9 @@ class VideoGroupWorker(QObject):
     loading_changed = Signal(bool)
     eof_reached = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, use_proxies: bool = False) -> None:
         super().__init__()
+        self._use_proxies: bool = use_proxies
         self._cmds: queue.Queue = queue.Queue()
         self._seek_gen: int = 0
         # Shared between the decode thread (writer) and the emit loop (reader).
@@ -68,21 +69,25 @@ class VideoGroupWorker(QObject):
         """Thread-safe: enqueue a command tuple."""
         self._cmds.put(args)
 
-    @staticmethod
-    def _open(paths: list[Path], offsets: list[float]) -> VideoGroupDecoder:
-        resize = Resize(_MOSAIC_MAX_EDGE)
-        # batch_size=1: each decoded batch is full-resolution RGB held on the
-        # GPU until resize, so on 4K a larger batch multiplies both GPU memory
-        # (measured 6 GB peak for 3 tracks at batch 8 vs ~1 GB at batch 1 —
-        # enough to spill into WDDM shared host RAM and stall the machine) and
-        # seek latency (a seek decodes a whole batch just to show one frame:
-        # 4.3 s at batch 8 vs 0.2 s at batch 1). Preview is one-frame-per-tick,
-        # so batching buys nothing here.
+    def _open(self, paths: list[Path], offsets: list[float]) -> VideoGroupDecoder:
+        # With --use_proxies, play a 480p/30fps proxy rather than the source:
+        # decoding raw 5.3K 60fps footage per track cannot hold real time across
+        # a mosaic. ensure_preview_proxy transcodes+caches once (cache is warm
+        # from the startup pre-pass); sources within the envelope pass through
+        # unchanged. Without the flag, the source is decoded directly. The proxy
+        # is already preview resolution, so no decode-side resize transform is
+        # needed — the display widget does the single scale-to-fit.
+        # batch_size=1: preview shows one frame per tick, and a larger batch only
+        # inflates seek latency (a seek would decode a whole batch to show one
+        # frame) for no benefit.
         tracks = [
             TrackSpec(
-                PyAvVideoDecoder(p, device=_DEVICE, batch_size=1),
+                PyAvVideoDecoder(
+                    str(ensure_preview_proxy(Path(p)) if self._use_proxies else p),
+                    device=_DEVICE,
+                    batch_size=1,
+                ),
                 offset=off,
-                transform=resize,
             )
             for p, off in zip(paths, offsets)
         ]
@@ -145,11 +150,16 @@ class VideoGroupWorker(QObject):
                         _, paths, offsets = cmd
                         if group is not None:
                             group.close()
+                        # First open of a high-res mosaic transcodes proxies,
+                        # which can take minutes; hold the overlay until ready.
+                        self.loading_changed.emit(True)
                         try:
                             group = self._open(paths, list(offsets))
                         except Exception:
                             logger.exception("VideoGroupDecoder open failed")
                             group = None
+                        finally:
+                            self.loading_changed.emit(False)
                         self._playing = False
                         self._latest = None
 
@@ -233,6 +243,51 @@ class VideoGroupWorker(QObject):
                 group.close()
 
 
+class _FrameLabel(QLabel):
+    """Displays a frame scaled to fit, keeping aspect ratio, on every resize.
+
+    Rescaling lives in the label's own ``resizeEvent`` so it reads the label's
+    real current size (a parent widget's ``resizeEvent`` fires before the layout
+    has resized its children, so it would scale to a stale size). An ``Ignored``
+    size policy keeps the shown pixmap from feeding back into the layout as a
+    minimum, so a mosaic cell can always shrink and the whole frame stays
+    visible however small the window gets.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._source: QPixmap | None = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("background-color: black;")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.setMinimumSize(1, 1)
+
+    def set_frame(self, pixmap: QPixmap) -> None:
+        self._source = pixmap
+        self._rescale()
+
+    def clear(self) -> None:
+        self._source = None
+        super().clear()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self._source is None:
+            return
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        super().setPixmap(
+            self._source.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+
 class VideoPlayerWidget(QWidget):
     """Pure display widget for one video track.
 
@@ -247,13 +302,8 @@ class VideoPlayerWidget(QWidget):
 
         self._offset_s: float = 0.0
         self._global_pos: float = 0.0
-        self._last_frame: np.ndarray | None = None
 
-        self._label = QLabel(self)
-        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet("background-color: black;")
-        self._label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._label.setMinimumSize(320, 180)
+        self._label = _FrameLabel(self)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -270,8 +320,6 @@ class VideoPlayerWidget(QWidget):
 
     def clear(self) -> None:
         self._label.clear()
-        self._label.setStyleSheet("background-color: black;")
-        self._last_frame = None
 
     @property
     def global_position(self) -> float:
@@ -281,25 +329,7 @@ class VideoPlayerWidget(QWidget):
         self._display_frame(np.zeros((180, 320, 3), dtype=np.uint8))
 
     def _display_frame(self, frame: np.ndarray) -> None:
-        self._last_frame = frame
-        self._redraw_last_frame()
-
-    def _redraw_last_frame(self) -> None:
-        if self._last_frame is None:
-            return
-        frame = self._last_frame
         h, w = frame.shape[:2]
-        lw, lh = self._label.width(), self._label.height()
-        if lw <= 0 or lh <= 0:
-            return
         image = QImage(frame.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
-        scaled = QPixmap.fromImage(image).scaled(
-            lw, lh,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
-        self._label.setPixmap(scaled)
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._redraw_last_frame()
+        # fromImage copies, so the frame buffer need not outlive this call.
+        self._label.set_frame(QPixmap.fromImage(image))

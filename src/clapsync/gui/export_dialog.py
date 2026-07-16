@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -59,30 +58,39 @@ class ExportDialog(QDialog):
 
         min_info = min(video_infos, key=lambda v: v.width * v.height)
         ref_w, ref_h = min_info.width, min_info.height
-        scales = (1.0, 0.75, 0.5, 0.25)
-        self._resolutions = tuple(
-            (max(2, int(ref_w * s) & ~1), max(2, int(ref_h * s) & ~1)) for s in scales
-        )
+        # Native first (the default), then standard heights below it, each at the
+        # source aspect ratio (widths rounded to even for the encoders). Upscaling
+        # to a standard larger than the source is never offered.
+        self._resolutions = [(ref_w, ref_h)]
+        res_labels = [f"Native ({ref_w}×{ref_h})"]
+        for std_h in (2160, 1440, 1080, 720, 480):
+            if std_h >= ref_h:
+                continue
+            std_w = max(2, round(std_h * ref_w / ref_h)) & ~1
+            self._resolutions.append((std_w, std_h))
+            res_labels.append(f"{std_h}p ({std_w}×{std_h})")
 
         scale_row = QHBoxLayout()
         scale_row.addWidget(QLabel("Resolution:"))
         self._scale_combo = QComboBox()
-        for w, h in self._resolutions:
-            self._scale_combo.addItem(f"{w}×{h}")
+        self._scale_combo.addItems(res_labels)
         scale_row.addWidget(self._scale_combo)
         scale_row.addStretch()
         layout.addLayout(scale_row)
 
-        min_fps = min((info.fps for info in video_infos), default=30.0)
+        native_fps = min((info.fps for info in video_infos), default=30.0)
+        self._fps_values = [native_fps]
+        fps_labels = [f"Native ({native_fps:g} fps)"]
+        for std_fps in (60.0, 50.0, 30.0, 25.0, 24.0):
+            if std_fps < native_fps - 0.01:
+                self._fps_values.append(std_fps)
+                fps_labels.append(f"{std_fps:g} fps")
+
         fps_row = QHBoxLayout()
         fps_row.addWidget(QLabel("Frame rate:"))
-        self._fps_spin = QDoubleSpinBox()
-        self._fps_spin.setRange(1.0, 240.0)
-        self._fps_spin.setDecimals(3)
-        self._fps_spin.setSingleStep(1.0)
-        self._fps_spin.setSuffix(" fps")
-        self._fps_spin.setValue(min_fps)
-        fps_row.addWidget(self._fps_spin)
+        self._fps_combo = QComboBox()
+        self._fps_combo.addItems(fps_labels)
+        fps_row.addWidget(self._fps_combo)
         fps_row.addStretch()
         layout.addLayout(fps_row)
 
@@ -109,5 +117,5 @@ class ExportDialog(QDialog):
 
     def get_export_params(self) -> tuple[int, int, float, Path]:
         w, h = self._resolutions[self._scale_combo.currentIndex()]
-        fps = self._fps_spin.value()
+        fps = self._fps_values[self._fps_combo.currentIndex()]
         return w, h, fps, Path(self._dir_edit.text())

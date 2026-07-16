@@ -1,8 +1,9 @@
 """Integration tests for clapsync.app.decode."""
 import pytest
 import torch
+from framepipe.metadata import extract_video_metadata
 
-from clapsync.app.decode import load_audio, decode_frames_at
+from clapsync.app.decode import ensure_preview_proxy, load_audio, decode_frames_at
 from tests.conftest import frame_index
 
 
@@ -194,3 +195,43 @@ def test_decode_frames_at_cfr_behavior_unchanged(indexed_video):
     path, fps, n, w, h = indexed_video(n=8, fps=10.0)
     frames = decode_frames_at(path, [0.0, 0.3, 0.6], device="cpu")
     assert [frame_index(f) for f in frames] == [0, 3, 6]
+
+
+# ensure_preview_proxy caches to LOCALAPPDATA/clapsync/video-cache; point that
+# at a tmp dir so the tests never touch (or hit) the real user cache.
+@pytest.fixture
+def _isolated_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+
+
+def test_ensure_preview_proxy_passes_through_1080p_source(
+    rgb_video, _isolated_cache
+):
+    """A source at/below 1080p decodes fine, so it is returned unchanged."""
+    path, *_ = rgb_video(seconds=0.5, fps=30.0, w=1920, h=1080, name="hd.mp4")
+    assert ensure_preview_proxy(path) == path
+
+
+@pytest.mark.slow
+def test_ensure_preview_proxy_downscales_and_caches_large_source(
+    rgb_video, _isolated_cache
+):
+    """A >1080p source is transcoded to a 480-tall proxy and reused on re-open."""
+    path, *_ = rgb_video(seconds=0.5, fps=30.0, w=2560, h=1440, name="big.mp4")
+
+    proxy = ensure_preview_proxy(path)
+    assert proxy != path
+    assert proxy.exists()
+    assert extract_video_metadata(str(proxy)).height == 480
+
+    # Second call is a cache hit: same proxy path, no re-transcode.
+    assert ensure_preview_proxy(path) == proxy
+
+
+@pytest.mark.slow
+def test_ensure_preview_proxy_progress_reaches_one(rgb_video, _isolated_cache):
+    path, *_ = rgb_video(seconds=1.0, fps=30.0, w=2560, h=1440, name="prog.mp4")
+    seen = []
+    ensure_preview_proxy(path, progress=seen.append)
+    assert seen and seen[-1] == 1.0
+    assert all(0.0 <= f <= 1.0 for f in seen)

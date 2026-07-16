@@ -1,8 +1,10 @@
 """Muxed audio+video encoding via PyAV."""
 from __future__ import annotations
 
+import itertools
 from fractions import Fraction
 from pathlib import Path
+from typing import Iterable
 
 import av
 import numpy as np
@@ -49,7 +51,7 @@ def _quality_options(codec: str, crf: int) -> dict[str, str]:
 
 def encode_clip(
     out_path: Path,
-    video_frames: torch.Tensor | None,
+    video_frames: torch.Tensor | Iterable[torch.Tensor] | None,
     video_fps: float | None,
     audio_samples: torch.Tensor | None,
     sample_rate: int | None,
@@ -64,7 +66,10 @@ def encode_clip(
 
     Args:
         out_path: Destination path; container format inferred from suffix.
-        video_frames: (N, C, H, W) uint8 frames, or None for audio-only.
+        video_frames: (N, C, H, W) uint8 frames, or an iterable of (k, C, H, W)
+            uint8 chunks to stream past the encoder in bounded memory (a full
+            native-resolution export does not fit in RAM as one tensor), or None
+            for audio-only.
         video_fps: Output frame rate; required when video_frames is given.
         audio_samples: (C, M) float samples in [-1, 1], or None for
             video-only.
@@ -93,9 +98,22 @@ def encode_clip(
         astream = None
         resampler = None
         layout = None
+        video_chunks = None
 
         if video_frames is not None:
-            _, _channels, height, width = video_frames.shape
+            # Normalize a full tensor and a chunk iterable to one chunk stream;
+            # peek the first chunk for the frame dimensions without buffering
+            # the rest.
+            source = (
+                iter((video_frames,))
+                if torch.is_tensor(video_frames)
+                else iter(video_frames)
+            )
+            first_chunk = next(source, None)
+            if first_chunk is None or first_chunk.shape[0] == 0:
+                raise ValueError("encode_clip got no video frames")
+            video_chunks = itertools.chain((first_chunk,), source)
+            _, _channels, height, width = first_chunk.shape
             codec = video_codec or pick_video_codec(device)
             # Exact rational, not int(round(...)): rounding a GoPro's 59.94
             # (60000/1001) up to 60 makes the container declare a rate the
@@ -119,14 +137,15 @@ def encode_clip(
             )
 
         if vstream is not None:
-            frames = video_frames.cpu()
-            for i in range(frames.shape[0]):
-                rgb = frames[i].permute(1, 2, 0).numpy()  # CHW -> HWC
-                frame = av.VideoFrame.from_ndarray(
-                    np.ascontiguousarray(rgb), format="rgb24",
-                )
-                for packet in vstream.encode(frame):
-                    container.mux(packet)
+            for chunk in video_chunks:
+                chunk = chunk.cpu()
+                for i in range(chunk.shape[0]):
+                    rgb = chunk[i].permute(1, 2, 0).numpy()  # CHW -> HWC
+                    frame = av.VideoFrame.from_ndarray(
+                        np.ascontiguousarray(rgb), format="rgb24",
+                    )
+                    for packet in vstream.encode(frame):
+                        container.mux(packet)
             for packet in vstream.encode():
                 container.mux(packet)
 
