@@ -1,6 +1,11 @@
 """Media decode wrappers over framepipe/PyAV (audio waveforms, video frames)."""
 from __future__ import annotations
 
+import hashlib
+import logging
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -9,10 +14,15 @@ import numpy as np
 import torch
 from framepipe import IndexedFramePrefetcher, PyAvVideoDecoder
 
-# Progress is reported at most once per this fraction of a file. A 218 s GoPro
-# clip decodes to ~10k AAC frames; calling back on each one costs real time and
-# tells the GUI nothing it can draw.
+logger = logging.getLogger(__name__)
+
+# Progress is reported at most once per this fraction of a file, so a long clip
+# doesn't fire thousands of callbacks the GUI can't draw between.
 _PROGRESS_STEP = 0.01
+# stdout read granularity while draining ffmpeg. Small enough that even a short
+# clip yields many progress ticks; large enough that a 12 min clip is a few
+# hundred reads, not thousands.
+_READ_CHUNK = 1 << 16
 
 
 def load_audio(
@@ -22,60 +32,156 @@ def load_audio(
 ) -> tuple[torch.Tensor, int]:
     """Load a peak-normalized mono waveform from any audio/video file.
 
+    Decodes with an ``ffmpeg`` subprocess (downmix + resample happen in C, no
+    per-frame Python round-trip — an order of magnitude faster than decoding
+    frame by frame through PyAV on large 4K containers). The peak-normalized
+    result is cached on disk keyed by (path, mtime, size, target_rate), so a
+    file that has already been loaded returns instantly on the next open.
+
     Args:
         path: Source media path.
         target_rate: If set, decode/resample to this sample rate.
         progress: Optional 0..1 callback reporting this file's decode fraction.
-            Called as frames arrive, throttled to ~1% steps, ending at 1.0.
+            Throttled to ~1% steps, always ending at exactly 1.0.
 
     Returns:
         (waveform, sample_rate) where waveform is float32 shape (1, N).
 
     Raises:
         ValueError: If the file has no audio stream.
+        RuntimeError: If the ffmpeg binary is unavailable or decoding fails.
     """
-    chunks: list[np.ndarray] = []
+    path = Path(path)
+    key = _cache_key(path, target_rate)
+
+    cached = _cache_load(key)
+    if cached is not None:
+        if progress is not None:
+            progress(1.0)
+        return cached
+
+    rate, duration = _audio_meta(path, target_rate)
+    wave = _decode_with_ffmpeg(path, rate, duration, progress)
+    _cache_store(key, wave, rate)
+    return wave, rate
+
+
+def _audio_meta(path: Path, target_rate: int | None) -> tuple[int, float]:
+    """Resolve output sample rate and source duration via a metadata-only probe.
+
+    Opening the container without decoding is effectively free; it gives the
+    native sample rate (when no target is requested) and the duration used to
+    scale the progress bar.
+
+    Raises:
+        ValueError: If the file has no audio stream.
+    """
     with av.open(str(path)) as container:
         if not container.streams.audio:
             raise ValueError(f"no audio stream in {path}")
         stream = container.streams.audio[0]
-        stream.thread_type = "AUTO"
-
         rate = int(target_rate or stream.codec_context.sample_rate)
-        layout = stream.codec_context.layout
-        # fltp gives to_ndarray() a planar (channels, samples) float32 array
-        # regardless of what the codec natively emits.
-        resampler = av.AudioResampler(format="fltp", layout=layout, rate=rate)
-
-        time_base = float(stream.time_base)
         duration = (
             float(stream.duration * stream.time_base) if stream.duration else 0.0
         )
-        last = -1.0
-        for frame in container.decode(stream):
-            for resampled in resampler.resample(frame):
-                chunks.append(resampled.to_ndarray())
-            if progress is None or not duration or frame.pts is None:
-                continue
-            fraction = min(frame.pts * time_base / duration, 1.0)
+    return rate, duration
+
+
+def _decode_with_ffmpeg(
+    path: Path,
+    rate: int,
+    duration: float,
+    progress: Callable[[float], None] | None,
+) -> torch.Tensor:
+    """Stream mono f32le PCM out of ffmpeg and peak-normalize it.
+
+    Progress is driven by bytes received (each mono f32 sample is 4 bytes)
+    against the expected total from ``duration``, not ffmpeg's own ``-progress``
+    output — byte counting stays fine-grained even on short clips.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg not found on PATH; cannot decode audio")
+
+    cmd = [
+        ffmpeg, "-nostdin", "-v", "quiet",
+        "-i", str(path),
+        "-vn", "-ac", "1", "-ar", str(rate),
+        "-f", "f32le", "pipe:1",
+    ]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+
+    expected = int(duration * rate * 4) if duration else 0
+    buf = bytearray()
+    last = -1.0
+    assert proc.stdout is not None
+    while True:
+        chunk = proc.stdout.read(_READ_CHUNK)
+        if not chunk:
+            break
+        buf += chunk
+        if progress is not None and expected:
+            fraction = min(len(buf) / expected, 1.0)
             if fraction - last >= _PROGRESS_STEP:
                 progress(fraction)
                 last = fraction
-        for resampled in resampler.resample(None):  # flush
-            chunks.append(resampled.to_ndarray())
+    if proc.wait() != 0:
+        raise RuntimeError(f"ffmpeg failed to decode audio from {path}")
 
     if progress is not None:
         progress(1.0)
 
-    if not chunks:
+    if not buf:
         raise ValueError(f"no audio samples decoded from {path}")
-    data = torch.from_numpy(np.concatenate(chunks, axis=1))
+    samples = np.frombuffer(bytes(buf), dtype=np.float32)
+    wave = torch.from_numpy(samples.copy()).unsqueeze(0)  # (1, N)
 
-    mono = data.mean(dim=0, keepdim=True) if data.shape[0] > 1 else data
-    peak = mono.abs().max()
+    peak = wave.abs().max()
     if peak > 0:
-        mono = mono / peak
-    return mono.contiguous(), int(rate)
+        wave = wave / peak
+    return wave.contiguous()
+
+
+def _cache_dir() -> Path:
+    """Per-user cache directory for decoded waveforms."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    directory = Path(base) / "clapsync" / "audio-cache"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _cache_key(path: Path, target_rate: int | None) -> str:
+    """Content-addressed key: any edit to the file (mtime/size) invalidates it."""
+    st = path.stat()
+    raw = f"{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{target_rate}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_load(key: str) -> tuple[torch.Tensor, int] | None:
+    """Return the cached (waveform, rate) for ``key``, or None on miss/corruption."""
+    cache_file = _cache_dir() / f"{key}.npz"
+    if not cache_file.exists():
+        return None
+    try:
+        with np.load(cache_file) as data:
+            wave = torch.from_numpy(data["wave"])
+            return wave, int(data["rate"])
+    except Exception:  # noqa: BLE001 - a corrupt cache entry just re-decodes
+        logger.debug("ignoring unreadable audio cache entry %s", cache_file)
+        return None
+
+
+def _cache_store(key: str, wave: torch.Tensor, rate: int) -> None:
+    """Best-effort persist; a failed write (e.g. full disk) is non-fatal."""
+    cache_file = _cache_dir() / f"{key}.npz"
+    try:
+        np.savez(cache_file, wave=wave.numpy(), rate=np.int64(rate))
+    except Exception:  # noqa: BLE001 - caching is an optimization, never required
+        logger.debug("could not write audio cache entry %s", cache_file)
 
 
 def decode_frames_at(
