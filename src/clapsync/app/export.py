@@ -10,13 +10,12 @@ from pathlib import Path
 from typing import Callable, Literal
 
 import av
-import numpy as np
 import torch
 
 from clapsync.app.decode import load_audio
 from clapsync.app.encode import (
-    _AUDIO_BLOCK,
     _audio_codec_for,
+    _mux_audio_samples,
     _quality_options,
     encode_clip,
     pick_video_codec,
@@ -100,28 +99,6 @@ def clip_window(
     pad_start = max(0.0, offset - trim.start)
     pad_end = max(0.0, trim.end - (offset + duration))
     return local_start, local_end, pad_start, pad_end
-
-
-def frame_source_times(
-    offset: float, trim: TimeRange, out_fps: float
-) -> list[float]:
-    """Source timestamps for each output frame on the shared trim grid.
-
-    Output frame k sits at shared time trim.start + k / out_fps; the matching
-    source time subtracts the track offset. Values outside [0, duration) mark
-    frames the caller must black-pad. This keeps subframe offsets exact — the
-    output grid is fixed, the source is sampled at the precise shifted time.
-
-    Args:
-        offset: Track offset on the shared timeline (seconds).
-        trim: Output range on the shared timeline.
-        out_fps: Output frame rate.
-
-    Returns:
-        One source timestamp per output frame.
-    """
-    n_frames = round(trim.duration * out_fps)
-    return [trim.start + k / out_fps - offset for k in range(n_frames)]
 
 
 def _video_filter_chain(
@@ -240,35 +217,6 @@ def _stream_encode_video(
                 container.mux(packet)
 
 
-def _mux_waveform_audio(
-    container: av.container.OutputContainer,
-    astream: av.stream.Stream,
-    layout: str,
-    audio: torch.Tensor,
-    rate: int,
-) -> None:
-    """Mux the pre-trimmed waveform (small, already in memory) into ``astream``."""
-    resampler = av.AudioResampler(
-        format=astream.codec_context.format.name, layout=layout, rate=rate
-    )
-    samples = audio.cpu().numpy().astype(np.float32)
-    pts = 0
-    for start in range(0, samples.shape[1], _AUDIO_BLOCK):
-        block = np.ascontiguousarray(samples[:, start : start + _AUDIO_BLOCK])
-        frame = av.AudioFrame.from_ndarray(block, format="fltp", layout=layout)
-        frame.sample_rate = rate
-        frame.pts = pts
-        pts += block.shape[1]
-        for resampled in resampler.resample(frame):
-            for packet in astream.encode(resampled):
-                container.mux(packet)
-    for resampled in resampler.resample(None):
-        for packet in astream.encode(resampled):
-            container.mux(packet)
-    for packet in astream.encode():
-        container.mux(packet)
-
-
 def _export_video_track(
     info: MediaInfo,
     offset: float,
@@ -322,7 +270,7 @@ def _export_video_track(
                 native_size, native_fps,
             )
             if astream is not None:
-                _mux_waveform_audio(container, astream, layout, audio, rate)
+                _mux_audio_samples(container, astream, layout, audio, rate)
 
     codec = settings.video_codec or pick_video_codec(device)
     try:

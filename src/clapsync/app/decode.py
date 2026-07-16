@@ -1,4 +1,4 @@
-"""Media decode wrappers over framepipe/PyAV (audio waveforms, video frames)."""
+"""Media decode wrappers (ffmpeg audio waveforms, preview proxies)."""
 from __future__ import annotations
 
 import hashlib
@@ -12,7 +12,6 @@ from typing import Callable
 import av
 import numpy as np
 import torch
-from framepipe import IndexedFramePrefetcher, PyAvVideoDecoder
 
 from clapsync.app import media
 
@@ -194,70 +193,6 @@ def _cache_store(key: str, wave: torch.Tensor, rate: int) -> None:
         np.savez(cache_file, wave=wave.numpy(), rate=np.int64(rate))
     except Exception:  # noqa: BLE001 - caching is an optimization, never required
         logger.debug("could not write audio cache entry %s", cache_file)
-
-
-def decode_frames_at(
-    path: Path, seconds: list[float], device: str = "cpu"
-) -> torch.Tensor:
-    """Decode one frame per requested timestamp (NCHW uint8).
-
-    Timestamps are clamped into the decodable stream range so callers can pass
-    boundary times without raising. The frame for time t is the last one whose
-    pts <= t.
-
-    Args:
-        path: Source video path.
-        seconds: Presentation timestamps in seconds; may be unordered and may
-            repeat.
-        device: "cpu" or "cuda" (nvdec).
-
-    Returns:
-        uint8 tensor of shape (len(seconds), C, H, W) on the requested device.
-    """
-    if not seconds:
-        raise ValueError("decode_frames_at needs at least one timestamp")
-
-    # Construct the decoder first and read its metadata (one probe), instead
-    # of probing separately here and letting PyAvVideoDecoder._open probe
-    # again. This also lets us drop the `start_frame` seek-before-open below:
-    # IndexedFramePrefetcher seeks by itself on large forward gaps.
-    decoder = PyAvVideoDecoder(str(path), device=device, batch_size=1)
-    try:
-        pts = decoder.metadata.pts  # (num_frames,) seconds, CPU
-        # framepipe's pts is 0-based for CFR but stream-absolute (includes
-        # stream.start_time) for VFR. Normalize both to a 0-based, source-
-        # relative timeline so caller timestamps (which are source-relative)
-        # map correctly regardless of container/framerate mode. No-op for
-        # CFR, where pts[0] is already 0.
-        pts = pts - pts[0]
-        wanted = torch.tensor(seconds, dtype=pts.dtype).clamp_(
-            float(pts[0]), float(pts[-1])
-        )
-        # last frame with pts <= t (frame displayed at time t)
-        idx = (torch.searchsorted(pts, wanted, right=True) - 1).clamp_(
-            0, len(pts) - 1
-        )
-
-        # The prefetcher consumes a forward-ordered plan; sort, then invert
-        # back to caller order so unordered/duplicate timestamps behave.
-        order = torch.argsort(idx)
-        plan = idx[order].tolist()
-
-        batches = []
-        with IndexedFramePrefetcher(decoder, plan) as stream:
-            while (batch := stream.next_batch()) is not None:
-                batches.append(batch.frames)
-    except Exception:
-        # If IndexedFramePrefetcher's constructor (or anything above) raises
-        # before it takes ownership of `decoder`, nothing else will close it
-        # — close it here. On the normal path the prefetcher's context
-        # manager already closed it (close_decoder=True, the default), but
-        # VideoDecoder.close() is idempotent, so this is never a double-close.
-        decoder.close()
-        raise
-
-    frames = torch.cat(batches, dim=0)
-    return frames[torch.argsort(order)]
 
 
 def ensure_preview_proxy(

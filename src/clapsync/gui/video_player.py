@@ -266,10 +266,6 @@ class _FrameLabel(QLabel):
         self._source = pixmap
         self._rescale()
 
-    def clear(self) -> None:
-        self._source = None
-        super().clear()
-
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._rescale()
@@ -295,13 +291,8 @@ class VideoPlayerWidget(QWidget):
     externally by a ``VideoGroupWorker``.
     """
 
-    position_changed = Signal(float)  # global seconds
-
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-
-        self._offset_s: float = 0.0
-        self._global_pos: float = 0.0
 
         self._label = _FrameLabel(self)
 
@@ -309,21 +300,12 @@ class VideoPlayerWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._label)
 
-    def display_frame(self, frame: np.ndarray | None, global_pos: float) -> None:
-        """Display a decoded frame. Call from the main/GUI thread only."""
-        self._global_pos = global_pos
+    def display_frame(self, frame: np.ndarray | None) -> None:
+        """Display a decoded frame (None = black). GUI thread only."""
         if frame is not None:
-            self.position_changed.emit(global_pos)
             self._display_frame(frame)
         else:
             self._show_black()
-
-    def clear(self) -> None:
-        self._label.clear()
-
-    @property
-    def global_position(self) -> float:
-        return self._global_pos
 
     def _show_black(self) -> None:
         self._display_frame(np.zeros((180, 320, 3), dtype=np.uint8))

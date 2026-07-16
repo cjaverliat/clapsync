@@ -9,14 +9,10 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
-from clapsync.app import (
-    ExportResult,
-    ExportSettings,
-    compute_sync_offsets,
-)
+from clapsync.app import ExportSettings, compute_sync_offsets
 from clapsync.app.decode import ensure_preview_proxy
 from clapsync.app.export import export_media
-from clapsync.app.media import probe
+from clapsync.app.media import MediaInfo
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +155,6 @@ def _run_with_progress(worker, title: str, parent):
         if dialog.wasCanceled():
             if hasattr(worker, "cancel"):
                 worker.cancel()
-            thread.requestInterruption()
             thread.quit()
             thread.wait(3000)
             return None, None
@@ -213,12 +208,12 @@ class ExportWorker(QObject):
 
     def __init__(
         self,
-        paths: list[Path],
+        media: list[MediaInfo],
         offsets: list[float],
         settings: ExportSettings,
     ) -> None:
         super().__init__()
-        self._paths = paths
+        self._media = media
         self._offsets = offsets
         self._settings = settings
         self._cancelled = False
@@ -228,17 +223,7 @@ class ExportWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        n = len(self._paths)
-        plural = "s" if n != 1 else ""
-
-        # Probe first so the dialog names this phase instead of a vague
-        # "Preparing…": on-disk metadata reads, no encoding yet.
-        self.status.emit(f"Probing {n} source file{plural}…")
-        media = [probe(p) for p in self._paths]
-        if self._cancelled:
-            self.finished.emit([])
-            return
-
+        n = len(self._media)
         self.status.emit(f"Exporting — 0/{n} tracks done, estimating…")
         start = time.monotonic()
 
@@ -257,7 +242,7 @@ class ExportWorker(QObject):
                 self.status.emit(f"Exporting — {done}/{n} tracks done")
 
         results = export_media(
-            media,
+            self._media,
             self._offsets,
             self._settings,
             progress=_on_progress,

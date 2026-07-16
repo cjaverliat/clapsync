@@ -239,9 +239,6 @@ class SyncEditorWindow(QMainWindow):
     def _load_all_videos(self) -> None:
         paths = [info.path for info in self._video_infos]
 
-        for i, player in enumerate(self._players):
-            player._offset_s = self._offsets[i]
-
         self._stop_group_worker()
 
         worker = VideoGroupWorker(use_proxies=self._use_proxies)
@@ -291,7 +288,7 @@ class SyncEditorWindow(QMainWindow):
         seek_gen: int,
     ) -> None:
         for player, frame in zip(self._players, frames):
-            player.display_frame(frame, global_ts)
+            player.display_frame(frame)
         # Reject frames that were emitted before the most recent seek was
         # processed by the worker — their timestamps pre-date the new position.
         if global_ts >= 0.0 and seek_gen >= self._seek_gen:
@@ -361,9 +358,6 @@ class SyncEditorWindow(QMainWindow):
     @Slot(list)
     def _on_offsets_changed(self, offsets: list[float]) -> None:
         self._offsets = offsets
-        for i, player in enumerate(self._players):
-            if i < len(offsets):
-                player._offset_s = offsets[i]
         if self._group_worker is not None:
             self._group_worker.cmd("update_offsets", offsets[:])
         # Trim bounds may have been adjusted by _clamp_trim_to_tracks in the timeline.
@@ -428,7 +422,7 @@ class SyncEditorWindow(QMainWindow):
             return
 
         progress_dialog = QProgressDialog(
-            "Probing source files…", "Cancel", 0, 1000, self
+            "Exporting…", "Cancel", 0, 1000, self
         )
         progress_dialog.setWindowTitle("Export Progress")
         progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -437,7 +431,6 @@ class SyncEditorWindow(QMainWindow):
         progress_dialog.setValue(0)
         progress_dialog.show()
 
-        paths = [info.path for info in self._video_infos]
         settings = ExportSettings(
             trim=TimeRange(self._trim_start, self._trim_end),
             output_dir=output_dir,
@@ -445,7 +438,7 @@ class SyncEditorWindow(QMainWindow):
             target_height=target_height,
             output_fps=output_fps,
         )
-        worker = ExportWorker(paths, self._offsets, settings)
+        worker = ExportWorker(self._video_infos, self._offsets, settings)
         thread = QThread(self)
         worker.moveToThread(thread)
 

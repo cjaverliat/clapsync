@@ -1,4 +1,4 @@
-"""CPU vs GPU coverage for decode/encode/export.
+"""CPU vs GPU coverage for encode/export.
 
 GPU cases are skipped when no CUDA device is present, so the suite stays green
 on CPU-only machines while exercising both paths where a GPU exists. NVENC
@@ -8,7 +8,6 @@ import av
 import pytest
 import torch
 
-from clapsync.app.decode import decode_frames_at
 from clapsync.app.encode import encode_clip
 from clapsync.app.export import _nvenc_available, sync_and_trim
 
@@ -50,18 +49,6 @@ def test_nvenc_probe_true_on_gpu():
     _nvenc_available.cache_clear()
     assert _nvenc_available() is True
     _nvenc_available.cache_clear()
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("cuda", marks=cuda_only)]
-)
-def test_decode_frames_on_device(rgb_video, device):
-    path, fps, n, w, h = rgb_video(seconds=1.0, fps=30.0, w=256, h=144)
-    frames = decode_frames_at(path, [0.0, 0.5], device=device)
-    assert frames.shape == (2, 3, h, w)
-    assert frames.dtype == torch.uint8
-    assert frames.device.type == device
 
 
 @pytest.mark.slow

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, Signal
 from PySide6.QtGui import (
@@ -53,117 +52,54 @@ _THEME_DARK = {
     "trim_overlay":   QColor(0, 0, 0, 80),
 }
 
-_SCROLLBAR_STYLE_LIGHT = """
-QScrollBar:horizontal {
-    background: #E8E8E8;
-    height: 14px;
+def _scrollbar_qss(
+    orient: str, bg: str, border: str, handle: str, hover: str
+) -> str:
+    """QScrollBar stylesheet for one orientation and palette."""
+    side = "top" if orient == "horizontal" else "left"
+    size = "height" if orient == "horizontal" else "width"
+    min_size = "min-width" if orient == "horizontal" else "min-height"
+    return f"""
+QScrollBar:{orient} {{
+    background: {bg};
+    {size}: 14px;
     margin: 0;
     border: none;
-    border-top: 1px solid #CCCCCC;
-}
-QScrollBar::handle:horizontal {
-    background: #AAAAAA;
-    min-width: 20px;
+    border-{side}: 1px solid {border};
+}}
+QScrollBar::handle:{orient} {{
+    background: {handle};
+    {min_size}: 20px;
     border-radius: 3px;
     margin: 2px;
-}
-QScrollBar::handle:horizontal:hover {
-    background: #888888;
-}
-QScrollBar::add-line:horizontal,
-QScrollBar::sub-line:horizontal {
+}}
+QScrollBar::handle:{orient}:hover {{
+    background: {hover};
+}}
+QScrollBar::add-line:{orient},
+QScrollBar::sub-line:{orient} {{
     width: 0;
     height: 0;
-}
-QScrollBar::add-page:horizontal,
-QScrollBar::sub-page:horizontal {
+}}
+QScrollBar::add-page:{orient},
+QScrollBar::sub-page:{orient} {{
     background: none;
-}
+}}
 """
 
-_SCROLLBAR_STYLE_DARK = """
-QScrollBar:horizontal {
-    background: #2A2A2A;
-    height: 14px;
-    margin: 0;
-    border: none;
-    border-top: 1px solid #444444;
-}
-QScrollBar::handle:horizontal {
-    background: #555555;
-    min-width: 20px;
-    border-radius: 3px;
-    margin: 2px;
-}
-QScrollBar::handle:horizontal:hover {
-    background: #777777;
-}
-QScrollBar::add-line:horizontal,
-QScrollBar::sub-line:horizontal {
-    width: 0;
-    height: 0;
-}
-QScrollBar::add-page:horizontal,
-QScrollBar::sub-page:horizontal {
-    background: none;
-}
-"""
 
-_SCROLLBAR_VERT_STYLE_LIGHT = """
-QScrollBar:vertical {
-    background: #F5F5F5;
-    width: 14px;
-    margin: 0;
-    border: none;
-    border-left: 1px solid #CCCCCC;
-}
-QScrollBar::handle:vertical {
-    background: #AAAAAA;
-    min-height: 20px;
-    border-radius: 3px;
-    margin: 2px;
-}
-QScrollBar::handle:vertical:hover {
-    background: #888888;
-}
-QScrollBar::add-line:vertical,
-QScrollBar::sub-line:vertical {
-    width: 0;
-    height: 0;
-}
-QScrollBar::add-page:vertical,
-QScrollBar::sub-page:vertical {
-    background: none;
-}
-"""
-
-_SCROLLBAR_VERT_STYLE_DARK = """
-QScrollBar:vertical {
-    background: #1E1E1E;
-    width: 14px;
-    margin: 0;
-    border: none;
-    border-left: 1px solid #444444;
-}
-QScrollBar::handle:vertical {
-    background: #555555;
-    min-height: 20px;
-    border-radius: 3px;
-    margin: 2px;
-}
-QScrollBar::handle:vertical:hover {
-    background: #777777;
-}
-QScrollBar::add-line:vertical,
-QScrollBar::sub-line:vertical {
-    width: 0;
-    height: 0;
-}
-QScrollBar::add-page:vertical,
-QScrollBar::sub-page:vertical {
-    background: none;
-}
-"""
+_SCROLLBAR_STYLE_LIGHT = _scrollbar_qss(
+    "horizontal", "#E8E8E8", "#CCCCCC", "#AAAAAA", "#888888"
+)
+_SCROLLBAR_STYLE_DARK = _scrollbar_qss(
+    "horizontal", "#2A2A2A", "#444444", "#555555", "#777777"
+)
+_SCROLLBAR_VERT_STYLE_LIGHT = _scrollbar_qss(
+    "vertical", "#F5F5F5", "#CCCCCC", "#AAAAAA", "#888888"
+)
+_SCROLLBAR_VERT_STYLE_DARK = _scrollbar_qss(
+    "vertical", "#1E1E1E", "#444444", "#555555", "#777777"
+)
 
 
 @dataclass
@@ -676,27 +612,3 @@ class SyncTrimTimelineWidget(TimelineWidget):
         self._trim_end_s = min(self._trim_end_s, total)
         self._trim_start_s = min(self._trim_start_s, self._trim_end_s - 0.001)
         self._trim_start_s = max(0.0, self._trim_start_s)
-
-
-class RulerTimeline(TimelineWidget):
-    """Ruler + playhead only — no track bars, no vertical scrollbar."""
-
-    def __init__(self, duration_s: float, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._duration_s = duration_s
-        self.setMinimumHeight(HEADER_H + SCROLLBAR_H)
-        self._fit_zoom()
-
-    def set_duration(self, duration_s: float) -> None:
-        self._duration_s = duration_s
-        self._fit_zoom()
-        self.update()
-
-    def _total_duration(self) -> float:
-        return self._duration_s
-
-    def _needs_vscroll(self) -> bool:
-        return False
-
-    def _draw_tracks(self, painter, w: int, track_area_h: int) -> None:
-        pass
