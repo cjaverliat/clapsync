@@ -1,7 +1,10 @@
 """Compute per-track sync offsets on a shared timeline (audio-based)."""
 from __future__ import annotations
 
+import concurrent.futures
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -19,6 +22,7 @@ def offsets_from_media(
     *,
     reference_index: int = 0,
     refine: Refine = "parabolic",
+    target_rate: int | None = 16000,
     progress: Callable[[float], None] | None = None,
     status: Callable[[str], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
@@ -28,6 +32,11 @@ def offsets_from_media(
     Internal helper so callers that already hold MediaInfo (e.g. sync_and_trim)
     do not probe the same files twice. ``status`` receives a human-readable
     label for the current stage.
+
+    Args:
+        target_rate: Decode/resample audio to this rate before alignment. MFCC
+            sync needs far less than the native 48 kHz, so downsampling shrinks
+            the align stage. Pass None to keep each track's native rate.
 
     Raises:
         ValueError: If any track has no audio stream.
@@ -39,18 +48,54 @@ def offsets_from_media(
         )
 
     n = len(media)
-    waveforms: list[torch.Tensor] = []
-    rates: list[int] = []
-    for i, info in enumerate(media):
-        if is_cancelled is not None and is_cancelled():
-            return [0.0] * n
+    if is_cancelled is not None and is_cancelled():
+        return [0.0] * n
+
+    waveforms: list[torch.Tensor | None] = [None] * n
+    rates: list[int] = [0] * n
+
+    # Files decode concurrently — PyAV releases the GIL during decode, so this
+    # is real parallelism, not just interleaving. The single progress bar can't
+    # sweep one file at a time anymore, so it reports the mean of every file's
+    # decode fraction; `done` tracks completions for the status label.
+    lock = threading.Lock()
+    fracs = [0.0] * n
+    done = 0
+
+    def report(i: int, fraction: float) -> None:
+        # Only wired up when `progress` is set (see load_one), so no guard here.
+        with lock:
+            fracs[i] = fraction
+            progress(sum(fracs) / n)
+
+    def load_one(i: int, info: MediaInfo) -> None:
+        nonlocal done
+        wave, rate = load_audio(
+            info.path,
+            target_rate=target_rate,
+            progress=(lambda f, i=i: report(i, f)) if progress else None,
+        )
+        waveforms[i] = wave
+        rates[i] = rate
         if status is not None:
-            status(f"Loading audio ({i + 1}/{n})…")
-        if progress is not None:
-            progress(0.0)  # reset the bar; it sweeps 0..1 for this one file
-        wave, rate = load_audio(info.path, progress=progress)
-        waveforms.append(wave)
-        rates.append(rate)
+            with lock:
+                done += 1
+                status(f"Loading audio ({done}/{n})…")
+
+    if status is not None:
+        status(f"Loading audio ({n} files)…")
+
+    max_workers = min(n, os.cpu_count() or 1)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(load_one, i, info) for i, info in enumerate(media)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            if is_cancelled is not None and is_cancelled():
+                for pending in futures:
+                    pending.cancel()
+                return [0.0] * n
+            future.result()  # surface any load_audio exception
 
     if status is not None:
         status("Aligning waveforms…")
@@ -67,6 +112,7 @@ def compute_sync_offsets(
     *,
     reference_index: int = 0,
     refine: Refine = "parabolic",
+    target_rate: int | None = 16000,
     progress: Callable[[float], None] | None = None,
     status: Callable[[str], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
@@ -77,6 +123,8 @@ def compute_sync_offsets(
         paths: Input media file paths.
         reference_index: Track whose timeline is the origin.
         refine: Peak refinement.
+        target_rate: Decode/resample rate for alignment; None keeps native.
+            See offsets_from_media.
         progress: Optional 0..1 callback.
         status: Optional callback receiving a label for the current stage.
         is_cancelled: Optional cooperative cancel check.
@@ -96,5 +144,6 @@ def compute_sync_offsets(
         media.append(probe(p))
     return offsets_from_media(
         media, reference_index=reference_index, refine=refine,
-        progress=progress, status=status, is_cancelled=is_cancelled,
+        target_rate=target_rate, progress=progress, status=status,
+        is_cancelled=is_cancelled,
     )

@@ -57,6 +57,12 @@ def compute_offsets_with_progress(
     dialog = QProgressDialog("Preparing…", "Cancel", 0, 1000, parent)
     dialog.setWindowTitle("Computing Offsets")
     dialog.setMinimumWidth(420)
+    # Each per-file load ends at progress(1.0) -> value 1000. Left at the
+    # defaults the dialog would auto-reset and auto-hide on every file, so it
+    # flickers closed and reopens between "Loading audio (i/N)". Keep it up;
+    # it is dismissed when this function returns.
+    dialog.setAutoReset(False)
+    dialog.setAutoClose(False)
     dialog.setValue(0)
     dialog.show()
 
@@ -100,6 +106,7 @@ def compute_offsets_with_progress(
             return None
     thread.wait()
 
+    dialog.close()  # autoClose is off, so dismiss it explicitly
     if error is not None:
         QMessageBox.critical(parent, "Error", f"Failed to compute offsets:\n{error}")
         return None
