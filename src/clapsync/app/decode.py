@@ -233,7 +233,7 @@ def decode_frames_at(
         wanted = torch.tensor(seconds, dtype=pts.dtype).clamp_(
             float(pts[0]), float(pts[-1])
         )
-        # last frame with pts <= t, matching torchcodec's get_frames_played_at
+        # last frame with pts <= t (frame displayed at time t)
         idx = (torch.searchsorted(pts, wanted, right=True) - 1).clamp_(
             0, len(pts) - 1
         )

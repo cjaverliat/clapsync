@@ -10,9 +10,8 @@ import av
 import numpy as np
 import torch
 
-# Audio codec per container. torchcodec inferred this from the extension; PyAV
-# needs it named. Verified round-trips: pcm_s16le/libmp3lame/flac are
-# sample-exact, aac pads +128 (identical to torchcodec's aac padding).
+# Audio codec per container; PyAV needs it named explicitly. Verified
+# round-trips: pcm_s16le/libmp3lame/flac are sample-exact, aac pads +128.
 _AUDIO_CODEC_FOR_SUFFIX = {
     ".wav": "pcm_s16le",
     ".m4a": "aac",
@@ -77,9 +76,9 @@ def encode_clip(
             is given.
         video_codec: Override encoder name; defaults to pick_video_codec(device).
         crf: Constant quality for the video stream (mapped to cq on NVENC).
-        device: "cpu" or "cuda[:<index>]"; selects the default encoder. Unlike
-            the old torchcodec path this does not move the frame tensor —
-            h264_nvenc uploads from host memory itself.
+        device: "cpu" or "cuda[:<index>]"; selects the default encoder. Does
+            not move the frame tensor — h264_nvenc uploads from host memory
+            itself.
 
     Raises:
         ValueError: If required companions (fps/sample_rate) are missing, or

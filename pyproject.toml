@@ -102,6 +102,6 @@ nuitka \
   --output-filename=clapsync \
   --include-package=clapsync \
   --show-progress \
-  src/clapsync/app.py
+  src/clapsync/gui/app.py
 """
 description = "Build standalone clapsync binary"
