@@ -49,9 +49,10 @@ Type: filesandordirs; Name: "{app}"
 [Code]
 const
   { Expected bytes written during env setup (unpacked caches + env), in MB.
-    Measured download is ~2.2 GiB; extraction roughly triples it. Calibrate
-    against a real install's %LOCALAPPDATA%\clapsync size when convenient. }
-  EnvTotalMB = 8192;
+    Calibrated against a real cold install measured at 8.38 GiB on disk
+    (2026-07-17, lock for 0.2.0). Re-measure %LOCALAPPDATA%\clapsync when
+    the lock changes materially. }
+  EnvTotalMB = 8581;
 
 var
   EnvProgressPage: TOutputProgressWizardPage;
@@ -133,7 +134,7 @@ begin
   EnvProgressPage.SetProgress(UsedMB, EnvTotalMB);
   EnvProgressPage.SetText(
     'Downloading the Python/CUDA environment (~2 GB download)...',
-    Format('Elapsed %d:%.2d — about %.1f of ~8 GB written to disk', [
+    Format('Elapsed %d:%.2d — about %.1f of ~8.4 GB written to disk', [
       Secs div 60, Secs mod 60, UsedMB / 1024.0]));
 end;
 
