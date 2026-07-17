@@ -49,6 +49,17 @@ Type: filesandordirs; Name: "{app}"
 [Code]
 var
   EnvProgressPage: TOutputProgressWizardPage;
+  EnvStartTick: LongWord;
+  EnvTimer: LongWord;
+  LastPixiLine: String;
+
+function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
+  TimerFunc: LongWord): LongWord;
+  external 'SetTimer@user32.dll stdcall';
+function KillTimer(Wnd: LongWord; IdEvent: LongWord): LongWord;
+  external 'KillTimer@user32.dll stdcall';
+function GetTickCount: LongWord;
+  external 'GetTickCount@kernel32.dll stdcall';
 
 function InitializeSetup(): Boolean;
 var
@@ -74,12 +85,24 @@ end;
 
 procedure OnPixiLine(const S: String; const Error, FirstLine: Boolean);
 begin
+  { pixi is near-silent on a non-tty pipe (progress bars are tty-only):
+    it prints nothing during download/link and one line at the end. Keep
+    whatever does arrive for the log and the timer caption below. }
   Log('pixi| ' + S);
-  { Latest pixi line shown live inside the wizard. pixi detects the
-    non-tty pipe and emits plain lines, so no ANSI escape noise here. }
-  if (not WizardSilent) and (S <> '') then
-    EnvProgressPage.SetText(
-      'Downloading the Python/CUDA environment (~5 GB, 10-20 min)...', S);
+  if S <> '' then
+    LastPixiLine := S;
+end;
+
+procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
+  TickCount: LongWord);
+var
+  Secs: LongWord;
+begin
+  Secs := (GetTickCount - EnvStartTick) div 1000;
+  EnvProgressPage.SetText(
+    'Downloading the Python/CUDA environment (~5 GB, 10-20 min)...',
+    Format('Elapsed %d:%.2d — %s', [Secs div 60, Secs mod 60,
+      LastPixiLine]));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -89,23 +112,33 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    LastPixiLine := 'pixi is downloading and linking packages';
     if not WizardSilent then
     begin
+      EnvStartTick := GetTickCount;
       EnvProgressPage.SetText(
         'Downloading the Python/CUDA environment (~5 GB, 10-20 min)...',
-        'Starting pixi...');
+        LastPixiLine);
       EnvProgressPage.ProgressBar.Style := npbstMarquee;
       EnvProgressPage.ProgressBar.Visible := True;
       EnvProgressPage.Show;
+      { 1 Hz elapsed-time refresh: pixi gives a pipe no progress feed, so
+        the page proves liveness with a clock instead. Wnd=0 timers fire
+        via the message pump, which Inno keeps running during Exec waits. }
+      EnvTimer := SetTimer(0, 0, 1000, CreateCallback(@EnvTimerProc));
     end;
     try
       { SW_HIDE: no console window exists, so the environment setup cannot
-        be closed by mistake; output streams to the wizard page above and
-        the setup log instead. }
+        be closed by mistake; output goes to the setup log instead. }
       ExecOk := ExecAndLogOutput(ExpandConstant('{cmd}'),
           '/C ""' + ExpandConstant('{app}') + '\setup_env.cmd""', '',
           SW_HIDE, ewWaitUntilTerminated, ResultCode, @OnPixiLine);
     finally
+      if EnvTimer <> 0 then
+      begin
+        KillTimer(0, EnvTimer);
+        EnvTimer := 0;
+      end;
       if not WizardSilent then
         EnvProgressPage.Hide;
     end;
