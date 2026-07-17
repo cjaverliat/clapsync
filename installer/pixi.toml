@@ -4,8 +4,10 @@
 # wheels into wheels/ — the find-links source); installed on the target by
 # setup_env.cmd via `pixi install --locked`.
 #
-# Version pins for torch/torchaudio/PySide6/triton MUST track
-# [tool.pixi.pypi-dependencies] in ../pyproject.toml.
+# Version pins for torch/torchaudio/PySide6 MUST track
+# [tool.pixi.pypi-dependencies] in ../pyproject.toml; triton-windows tracks
+# [tool.pixi.target.win-64.pypi-dependencies]; the av floor tracks
+# [project.optional-dependencies] app.
 
 [workspace]
 name = "clapsync-dist"

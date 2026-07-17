@@ -43,8 +43,10 @@ where = ["src"]
 channels = ["conda-forge"]
 platforms = ["linux-64", "win-64"]
 
-# Torch/PySide6/triton pins are duplicated in installer/pixi.toml (shipped
-# Windows env) — keep them in sync when bumping.
+# Torch/PySide6 pins here (and the triton pin in
+# [tool.pixi.target.win-64.pypi-dependencies]) are duplicated in
+# installer/pixi.toml (shipped Windows env) — keep them in sync when
+# bumping.
 [tool.pixi.pypi-dependencies]
 clapsync = { path = ".", editable = true }
 framepipe = { path = "../framepipe", editable = true }

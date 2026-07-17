@@ -9,13 +9,13 @@ Run from the dev environment: pixi run build-installer
 """
 from __future__ import annotations
 
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tomllib
 import urllib.request
 import zipfile
-from pathlib import Path
 
 PIXI_VERSION = "0.59.0"
 PIXI_URL = (
@@ -29,7 +29,7 @@ VENDOR = INSTALLER / "vendor"
 FRAMEPIPE = ROOT.parent / "framepipe"
 
 
-def run(cmd: list) -> None:
+def run(cmd: list[str | Path]) -> None:
     """Runs a command, echoing it first; exits nonzero on failure."""
     print("+", *map(str, cmd), flush=True)
     subprocess.run([str(c) for c in cmd], check=True)
