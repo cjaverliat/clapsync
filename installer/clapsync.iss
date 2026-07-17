@@ -1,7 +1,10 @@
 ; clapsync online-bootstrap installer.
 ; Compiled by installer/build.py: ISCC /DAppVersion=<ver> clapsync.iss
 ; Installs per-user, then runs setup_env.cmd (pixi install --locked) to
-; materialize the Python/CUDA environment (~5 GB download).
+; materialize the Python/CUDA environment (~2 GB download, ~8.4 GB on disk).
+; pixi runs in its own visible console (a real tty, so it renders its own
+; per-package progress); the console is guarded: QuickEdit and Ctrl+C are
+; disabled by setup_env.cmd, and the close button is removed below.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -48,20 +51,17 @@ Type: filesandordirs; Name: "{app}"
 
 [Code]
 const
-  { Expected bytes written during env setup (unpacked caches + env), in MB.
-    Calibrated against a real cold install measured at 8.38 GiB on disk
-    (2026-07-17, lock for 0.2.0). Re-measure %LOCALAPPDATA%\clapsync when
-    the lock changes materially. }
-  EnvTotalMB = 8581;
+  { setup_env.cmd sets this exact console title; the timer below finds the
+    window by it to strip the close button (which also disables Alt+F4). }
+  EnvConsoleTitle = 'clapsync environment setup';
+  SC_CLOSE_ = $F060;
+  MF_BYCOMMAND_ = 0;
 
 var
   EnvProgressPage: TOutputProgressWizardPage;
-  EnvMemo: TNewMemo;
   EnvStartTick: LongWord;
   EnvTimer: LongWord;
-  EnvFreeAtStart: Int64;
-  EnvSiteDir, EnvCacheDir: String;
-  EnvBaseSite, EnvBaseCache: TFileTime;
+  EnvConsoleGuarded: Boolean;
 
 function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
   TimerFunc: LongWord): LongWord;
@@ -70,6 +70,12 @@ function KillTimer(Wnd: LongWord; IdEvent: LongWord): LongWord;
   external 'KillTimer@user32.dll stdcall';
 function GetTickCount: LongWord;
   external 'GetTickCount@kernel32.dll stdcall';
+function FindWindowByTitle(ClassName, WindowName: String): LongWord;
+  external 'FindWindowW@user32.dll stdcall';
+function GetSystemMenu(Wnd: LongWord; Revert: LongWord): LongWord;
+  external 'GetSystemMenu@user32.dll stdcall';
+function DeleteMenu(Menu: LongWord; Position, Flags: LongWord): LongWord;
+  external 'DeleteMenu@user32.dll stdcall';
 
 function InitializeSetup(): Boolean;
 var
@@ -90,128 +96,48 @@ end;
 procedure InitializeWizard();
 begin
   EnvProgressPage := CreateOutputProgressPage('Setting up the environment',
-    'clapsync is downloading its Python/CUDA environment.');
-  { Console-style box under the bar collecting pixi's (sparse) output. }
-  EnvMemo := TNewMemo.Create(WizardForm);
-  EnvMemo.Parent := EnvProgressPage.Surface;
-  EnvMemo.Left := 0;
-  EnvMemo.Top := EnvProgressPage.ProgressBar.Top
-    + EnvProgressPage.ProgressBar.Height + ScaleY(16);
-  EnvMemo.Width := EnvProgressPage.SurfaceWidth;
-  EnvMemo.Height := ScaleY(110);
-  EnvMemo.ReadOnly := True;
-  EnvMemo.ScrollBars := ssVertical;
-  EnvMemo.Font.Name := 'Consolas';
-end;
-
-procedure OnPixiLine(const S: String; const Error, FirstLine: Boolean);
-begin
-  { pixi is near-silent on a non-tty pipe (progress bars are tty-only):
-    a warning or two mid-run and one line at the end. Collect them as
-    history in the memo so a lone warning doesn't read as a hang. }
-  Log('pixi| ' + S);
-  if (S <> '') and (EnvMemo <> nil) then
-    EnvMemo.Lines.Add(S);
-end;
-
-function NewerFT(const A, B: TFileTime): Boolean;
-begin
-  Result := (A.dwHighDateTime > B.dwHighDateTime)
-    or ((A.dwHighDateTime = B.dwHighDateTime)
-        and (A.dwLowDateTime > B.dwLowDateTime));
-end;
-
-{ Name of the most recently created subdirectory, with its timestamp. }
-function NewestSubdir(const Dir: String; var Newest: TFileTime): String;
-var
-  FR: TFindRec;
-begin
-  Result := '';
-  Newest.dwLowDateTime := 0;
-  Newest.dwHighDateTime := 0;
-  if FindFirst(Dir + '\*', FR) then
-  try
-    repeat
-      if (FR.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0)
-         and (FR.Name <> '.') and (FR.Name <> '..')
-         and NewerFT(FR.CreationTime, Newest) then
-      begin
-        Newest := FR.CreationTime;
-        Result := FR.Name;
-      end;
-    until not FindNext(FR);
-  finally
-    FindClose(FR);
-  end;
+    'pixi shows its progress in the console window next to this one.');
 end;
 
 procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
   TickCount: LongWord);
 var
-  FreeNow, TotalDisk: Int64;
-  UsedMB: LongInt;
   Secs: LongWord;
-  Name, Activity: String;
-  FT: TFileTime;
+  ConsoleWnd: LongWord;
 begin
-  { pixi reports no progress to a pipe, but its work is visible on disk:
-    free-space delta drives the bar, and package dirs appearing in the
-    env / package cache name what is being installed right now. Only
-    dirs created after this run started count (update runs start with a
-    populated env). }
-  Secs := (GetTickCount - EnvStartTick) div 1000;
-  UsedMB := 0;
-  if (EnvFreeAtStart > 0)
-     and GetSpaceOnDisk64(ExpandConstant('{localappdata}'), FreeNow,
-       TotalDisk)
-     and (EnvFreeAtStart > FreeNow) then
-    UsedMB := LongInt((EnvFreeAtStart - FreeNow) div 1048576);
-  if UsedMB > (EnvTotalMB * 99) div 100 then
-    UsedMB := (EnvTotalMB * 99) div 100;
-  EnvProgressPage.SetProgress(UsedMB, EnvTotalMB);
-  Activity := 'downloading packages';
-  Name := NewestSubdir(EnvSiteDir, FT);
-  if (Name <> '') and NewerFT(FT, EnvBaseSite) then
-    Activity := 'installing ' + Name
-  else
+  { The console appears shortly after Exec starts and only then gets its
+    title (set by setup_env.cmd) — so the guard is applied from here,
+    first tick that finds it. Classic conhost only; under Windows
+    Terminal the lookup misses and the guard is skipped. }
+  if not EnvConsoleGuarded then
   begin
-    Name := NewestSubdir(EnvCacheDir, FT);
-    if (Name <> '') and NewerFT(FT, EnvBaseCache) then
-      Activity := 'extracting ' + Name;
+    ConsoleWnd := FindWindowByTitle('ConsoleWindowClass', EnvConsoleTitle);
+    if ConsoleWnd <> 0 then
+    begin
+      DeleteMenu(GetSystemMenu(ConsoleWnd, 0), SC_CLOSE_, MF_BYCOMMAND_);
+      EnvConsoleGuarded := True;
+    end;
   end;
+  Secs := (GetTickCount - EnvStartTick) div 1000;
   EnvProgressPage.SetText(
-    'Downloading the Python/CUDA environment (~2 GB download)...',
-    Format('Elapsed %d:%.2d — %s', [
-      Secs div 60, Secs mod 60, Activity]));
+    'pixi is installing the Python/CUDA environment (~2 GB download).',
+    Format('Elapsed %d:%.2d — progress shows in the console window.', [
+      Secs div 60, Secs mod 60]));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   ExecOk: Boolean;
-  FreeTotal: Int64;
 begin
   if CurStep = ssPostInstall then
   begin
     if not WizardSilent then
     begin
       EnvStartTick := GetTickCount;
-      EnvFreeAtStart := 0;
-      if not GetSpaceOnDisk64(ExpandConstant('{localappdata}'),
-          EnvFreeAtStart, FreeTotal) then
-        EnvFreeAtStart := 0;
-      EnvSiteDir := ExpandConstant('{app}')
-        + '\app\.pixi\envs\default\Lib\site-packages';
-      EnvCacheDir := ExpandConstant('{app}') + '\cache\pkgs';
-      { Baseline newest-dir times so update runs ignore what an earlier
-        install already created. }
-      NewestSubdir(EnvSiteDir, EnvBaseSite);
-      NewestSubdir(EnvCacheDir, EnvBaseCache);
-      EnvMemo.Lines.Add('> pixi install --locked  (output below; pixi '
-        + 'prints little while it downloads)');
-      EnvProgressPage.SetProgress(0, EnvTotalMB);
+      EnvConsoleGuarded := False;
       EnvProgressPage.SetText(
-        'Downloading the Python/CUDA environment (~2 GB download)...',
+        'pixi is installing the Python/CUDA environment (~2 GB download).',
         'Starting pixi...');
       EnvProgressPage.Show;
       { 1 Hz refresh via Wnd=0 timer: fires through the message pump,
@@ -219,11 +145,13 @@ begin
       EnvTimer := SetTimer(0, 0, 1000, CreateCallback(@EnvTimerProc));
     end;
     try
-      { SW_HIDE: no console window exists, so the environment setup cannot
-        be closed by mistake; output goes to the setup log instead. }
-      ExecOk := ExecAndLogOutput(ExpandConstant('{cmd}'),
+      { Visible console: a real tty, so pixi renders its own per-package
+        progress there (piping the output would silence it). setup_env.cmd
+        disables QuickEdit (click-freeze) and Ctrl+C; the timer removes
+        the close button. }
+      ExecOk := Exec(ExpandConstant('{cmd}'),
           '/C ""' + ExpandConstant('{app}') + '\setup_env.cmd""', '',
-          SW_HIDE, ewWaitUntilTerminated, ResultCode, @OnPixiLine);
+          SW_SHOW, ewWaitUntilTerminated, ResultCode);
     finally
       if EnvTimer <> 0 then
       begin
