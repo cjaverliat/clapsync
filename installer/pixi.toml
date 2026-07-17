@@ -17,6 +17,11 @@ python = ">=3.10,<3.13"
 ffmpeg = "*"
 
 [pypi-options]
+# pixi 0.59.0 needs this spelled out: with only find-links set, the pypi
+# resolver fails on every non-local package ("not found in the provided
+# package locations") instead of falling back to the documented default
+# index. Explicit index-url restores that fallback.
+index-url = "https://pypi.org/simple"
 find-links = [{ path = "wheels" }]
 
 [pypi-dependencies]
