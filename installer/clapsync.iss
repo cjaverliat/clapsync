@@ -47,11 +47,18 @@ Name: "{userdesktop}\clapsync"; Filename: "{sys}\wscript.exe"; Parameters: """{a
 Type: filesandordirs; Name: "{app}"
 
 [Code]
+const
+  { Expected bytes written during env setup (unpacked caches + env), in MB.
+    Measured download is ~2.2 GiB; extraction roughly triples it. Calibrate
+    against a real install's %LOCALAPPDATA%\clapsync size when convenient. }
+  EnvTotalMB = 8192;
+
 var
   EnvProgressPage: TOutputProgressWizardPage;
+  EnvMemo: TNewMemo;
   EnvStartTick: LongWord;
   EnvTimer: LongWord;
-  LastPixiLine: String;
+  EnvFreeAtStart: Int64;
 
 function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
   TimerFunc: LongWord): LongWord;
@@ -81,50 +88,79 @@ procedure InitializeWizard();
 begin
   EnvProgressPage := CreateOutputProgressPage('Setting up the environment',
     'clapsync is downloading its Python/CUDA environment.');
+  { Console-style box under the bar collecting pixi's (sparse) output. }
+  EnvMemo := TNewMemo.Create(WizardForm);
+  EnvMemo.Parent := EnvProgressPage.Surface;
+  EnvMemo.Left := 0;
+  EnvMemo.Top := EnvProgressPage.ProgressBar.Top
+    + EnvProgressPage.ProgressBar.Height + ScaleY(16);
+  EnvMemo.Width := EnvProgressPage.SurfaceWidth;
+  EnvMemo.Height := ScaleY(110);
+  EnvMemo.ReadOnly := True;
+  EnvMemo.ScrollBars := ssVertical;
+  EnvMemo.Font.Name := 'Consolas';
 end;
 
 procedure OnPixiLine(const S: String; const Error, FirstLine: Boolean);
 begin
   { pixi is near-silent on a non-tty pipe (progress bars are tty-only):
-    it prints nothing during download/link and one line at the end. Keep
-    whatever does arrive for the log and the timer caption below. }
+    a warning or two mid-run and one line at the end. Collect them as
+    history in the memo so a lone warning doesn't read as a hang. }
   Log('pixi| ' + S);
-  if S <> '' then
-    LastPixiLine := S;
+  if (S <> '') and (EnvMemo <> nil) then
+    EnvMemo.Lines.Add(S);
 end;
 
 procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
   TickCount: LongWord);
 var
+  FreeNow, TotalDisk: Int64;
+  UsedMB: LongInt;
   Secs: LongWord;
 begin
+  { pixi reports no progress to a pipe, but every downloaded/linked byte
+    lands under the install dir — so bytes-written (free-space delta on
+    the target volume) is a real progress signal, O(1) per tick. }
   Secs := (GetTickCount - EnvStartTick) div 1000;
+  UsedMB := 0;
+  if (EnvFreeAtStart > 0)
+     and GetSpaceOnDisk64(ExpandConstant('{localappdata}'), FreeNow,
+       TotalDisk)
+     and (EnvFreeAtStart > FreeNow) then
+    UsedMB := LongInt((EnvFreeAtStart - FreeNow) div 1048576);
+  if UsedMB > (EnvTotalMB * 99) div 100 then
+    UsedMB := (EnvTotalMB * 99) div 100;
+  EnvProgressPage.SetProgress(UsedMB, EnvTotalMB);
   EnvProgressPage.SetText(
-    'Downloading the Python/CUDA environment (~5 GB, 10-20 min)...',
-    Format('Elapsed %d:%.2d — %s', [Secs div 60, Secs mod 60,
-      LastPixiLine]));
+    'Downloading the Python/CUDA environment (~2 GB download)...',
+    Format('Elapsed %d:%.2d — about %.1f of ~8 GB written to disk', [
+      Secs div 60, Secs mod 60, UsedMB / 1024.0]));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   ExecOk: Boolean;
+  FreeTotal: Int64;
 begin
   if CurStep = ssPostInstall then
   begin
-    LastPixiLine := 'pixi is downloading and linking packages';
     if not WizardSilent then
     begin
       EnvStartTick := GetTickCount;
+      EnvFreeAtStart := 0;
+      if not GetSpaceOnDisk64(ExpandConstant('{localappdata}'),
+          EnvFreeAtStart, FreeTotal) then
+        EnvFreeAtStart := 0;
+      EnvMemo.Lines.Add('> pixi install --locked  (output below; pixi '
+        + 'prints little while it downloads)');
+      EnvProgressPage.SetProgress(0, EnvTotalMB);
       EnvProgressPage.SetText(
-        'Downloading the Python/CUDA environment (~5 GB, 10-20 min)...',
-        LastPixiLine);
-      EnvProgressPage.ProgressBar.Style := npbstMarquee;
-      EnvProgressPage.ProgressBar.Visible := True;
+        'Downloading the Python/CUDA environment (~2 GB download)...',
+        'Starting pixi...');
       EnvProgressPage.Show;
-      { 1 Hz elapsed-time refresh: pixi gives a pipe no progress feed, so
-        the page proves liveness with a clock instead. Wnd=0 timers fire
-        via the message pump, which Inno keeps running during Exec waits. }
+      { 1 Hz refresh via Wnd=0 timer: fires through the message pump,
+        which Inno keeps running during Exec waits. }
       EnvTimer := SetTimer(0, 0, 1000, CreateCallback(@EnvTimerProc));
     end;
     try
