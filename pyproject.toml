@@ -26,6 +26,9 @@ triton = [
 clapsync = "clapsync.gui.app:main"
 clapsync-cli = "clapsync.cli:main"
 
+[project.gui-scripts]
+clapsync-gui = "clapsync.gui.app:main"
+
 [build-system]
 build-backend = "setuptools.build_meta"
 requires = ["setuptools"]
@@ -40,6 +43,8 @@ where = ["src"]
 channels = ["conda-forge"]
 platforms = ["linux-64", "win-64"]
 
+# Torch/PySide6/triton pins are duplicated in installer/pixi.toml (shipped
+# Windows env) — keep them in sync when bumping.
 [tool.pixi.pypi-dependencies]
 clapsync = { path = ".", editable = true }
 framepipe = { path = "../framepipe", editable = true }
