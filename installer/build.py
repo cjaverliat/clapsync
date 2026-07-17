@@ -12,6 +12,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tomllib
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -68,10 +69,33 @@ def relock() -> None:
          INSTALLER / "pixi.toml"])
 
 
+def app_version() -> str:
+    """Reads the clapsync version from the root pyproject."""
+    with open(ROOT / "pyproject.toml", "rb") as f:
+        return tomllib.load(f)["project"]["version"]
+
+
+def compile_installer() -> None:
+    """Compiles clapsync.iss with ISCC into outputs/."""
+    candidates = [
+        Path("C:/Program Files (x86)/Inno Setup 6/ISCC.exe"),
+        Path.home() / "AppData/Local/Programs/Inno Setup 6/ISCC.exe",
+    ]
+    which = shutil.which("ISCC.exe")
+    if which:
+        candidates.append(Path(which))
+    iscc = next((p for p in candidates if p.exists()), None)
+    if iscc is None:
+        sys.exit("ISCC.exe not found - install Inno Setup 6: "
+                 "winget install JRSoftware.InnoSetup")
+    run([iscc, f"/DAppVersion={app_version()}", INSTALLER / "clapsync.iss"])
+
+
 def main() -> None:
     build_wheels()
     fetch_pixi()
     relock()
+    compile_installer()
 
 
 if __name__ == "__main__":

@@ -110,3 +110,7 @@ nuitka \
   src/clapsync/gui/app.py
 """
 description = "Build standalone clapsync binary"
+
+[tool.pixi.tasks.build-installer]
+cmd = "python installer/build.py"
+description = "Build the Windows online-bootstrap installer"

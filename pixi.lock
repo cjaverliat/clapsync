@@ -971,7 +971,7 @@ packages:
 - pypi: ./
   name: clapsync
   version: 0.2.0
-  sha256: 84b6e1cc32f7fc03ddbc6b6ead08a5d4eacb5ec5ebdda2e8ebd20b1c1137b27c
+  sha256: 7957fb4d74b26b88a5cd347d18c9a7fc02d108c33cf81b1a5234a28f68619046
   requires_dist:
   - numpy
   - torch>=2.11
