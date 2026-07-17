@@ -60,6 +60,8 @@ var
   EnvStartTick: LongWord;
   EnvTimer: LongWord;
   EnvFreeAtStart: Int64;
+  EnvSiteDir, EnvCacheDir: String;
+  EnvBaseSite, EnvBaseCache: TFileTime;
 
 function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
   TimerFunc: LongWord): LongWord;
@@ -112,16 +114,51 @@ begin
     EnvMemo.Lines.Add(S);
 end;
 
+function NewerFT(const A, B: TFileTime): Boolean;
+begin
+  Result := (A.dwHighDateTime > B.dwHighDateTime)
+    or ((A.dwHighDateTime = B.dwHighDateTime)
+        and (A.dwLowDateTime > B.dwLowDateTime));
+end;
+
+{ Name of the most recently created subdirectory, with its timestamp. }
+function NewestSubdir(const Dir: String; var Newest: TFileTime): String;
+var
+  FR: TFindRec;
+begin
+  Result := '';
+  Newest.dwLowDateTime := 0;
+  Newest.dwHighDateTime := 0;
+  if FindFirst(Dir + '\*', FR) then
+  try
+    repeat
+      if (FR.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0)
+         and (FR.Name <> '.') and (FR.Name <> '..')
+         and NewerFT(FR.CreationTime, Newest) then
+      begin
+        Newest := FR.CreationTime;
+        Result := FR.Name;
+      end;
+    until not FindNext(FR);
+  finally
+    FindClose(FR);
+  end;
+end;
+
 procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
   TickCount: LongWord);
 var
   FreeNow, TotalDisk: Int64;
   UsedMB: LongInt;
   Secs: LongWord;
+  Name, Activity: String;
+  FT: TFileTime;
 begin
-  { pixi reports no progress to a pipe, but every downloaded/linked byte
-    lands under the install dir — so bytes-written (free-space delta on
-    the target volume) is a real progress signal, O(1) per tick. }
+  { pixi reports no progress to a pipe, but its work is visible on disk:
+    free-space delta drives the bar, and package dirs appearing in the
+    env / package cache name what is being installed right now. Only
+    dirs created after this run started count (update runs start with a
+    populated env). }
   Secs := (GetTickCount - EnvStartTick) div 1000;
   UsedMB := 0;
   if (EnvFreeAtStart > 0)
@@ -132,10 +169,20 @@ begin
   if UsedMB > (EnvTotalMB * 99) div 100 then
     UsedMB := (EnvTotalMB * 99) div 100;
   EnvProgressPage.SetProgress(UsedMB, EnvTotalMB);
+  Activity := 'downloading packages';
+  Name := NewestSubdir(EnvSiteDir, FT);
+  if (Name <> '') and NewerFT(FT, EnvBaseSite) then
+    Activity := 'installing ' + Name
+  else
+  begin
+    Name := NewestSubdir(EnvCacheDir, FT);
+    if (Name <> '') and NewerFT(FT, EnvBaseCache) then
+      Activity := 'extracting ' + Name;
+  end;
   EnvProgressPage.SetText(
     'Downloading the Python/CUDA environment (~2 GB download)...',
-    Format('Elapsed %d:%.2d — about %.1f of ~8.4 GB written to disk', [
-      Secs div 60, Secs mod 60, UsedMB / 1024.0]));
+    Format('Elapsed %d:%.2d — %s', [
+      Secs div 60, Secs mod 60, Activity]));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -153,6 +200,13 @@ begin
       if not GetSpaceOnDisk64(ExpandConstant('{localappdata}'),
           EnvFreeAtStart, FreeTotal) then
         EnvFreeAtStart := 0;
+      EnvSiteDir := ExpandConstant('{app}')
+        + '\app\.pixi\envs\default\Lib\site-packages';
+      EnvCacheDir := ExpandConstant('{app}') + '\cache\pkgs';
+      { Baseline newest-dir times so update runs ignore what an earlier
+        install already created. }
+      NewestSubdir(EnvSiteDir, EnvBaseSite);
+      NewestSubdir(EnvCacheDir, EnvBaseCache);
       EnvMemo.Lines.Add('> pixi install --locked  (output below; pixi '
         + 'prints little while it downloads)');
       EnvProgressPage.SetProgress(0, EnvTotalMB);
