@@ -47,6 +47,9 @@ Name: "{userdesktop}\clapsync"; Filename: "{sys}\wscript.exe"; Parameters: """{a
 Type: filesandordirs; Name: "{app}"
 
 [Code]
+var
+  EnvProgressPage: TOutputProgressWizardPage;
+
 function InitializeSetup(): Boolean;
 var
   FreeBytes, TotalBytes: Int64;
@@ -63,19 +66,50 @@ begin
     end;
 end;
 
+procedure InitializeWizard();
+begin
+  EnvProgressPage := CreateOutputProgressPage('Setting up the environment',
+    'clapsync is downloading its Python/CUDA environment.');
+end;
+
+procedure OnPixiLine(const S: String; const Error, FirstLine: Boolean);
+begin
+  Log('pixi| ' + S);
+  { Latest pixi line shown live inside the wizard. pixi detects the
+    non-tty pipe and emits plain lines, so no ANSI escape noise here. }
+  if (not WizardSilent) and (S <> '') then
+    EnvProgressPage.SetText(
+      'Downloading the Python/CUDA environment (~5 GB, 10-20 min)...', S);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
+  ExecOk: Boolean;
 begin
   if CurStep = ssPostInstall then
   begin
     if not WizardSilent then
-      WizardForm.StatusLabel.Caption :=
-        'Downloading the Python/CUDA environment (~5 GB, 10-20 min)...';
-    if not Exec(ExpandConstant('{cmd}'),
-        '/C ""' + ExpandConstant('{app}') + '\setup_env.cmd""', '',
-        SW_SHOW, ewWaitUntilTerminated, ResultCode)
-       or (ResultCode <> 0) then
+    begin
+      EnvProgressPage.SetText(
+        'Downloading the Python/CUDA environment (~5 GB, 10-20 min)...',
+        'Starting pixi...');
+      EnvProgressPage.ProgressBar.Style := npbstMarquee;
+      EnvProgressPage.ProgressBar.Visible := True;
+      EnvProgressPage.Show;
+    end;
+    try
+      { SW_HIDE: no console window exists, so the environment setup cannot
+        be closed by mistake; output streams to the wizard page above and
+        the setup log instead. }
+      ExecOk := ExecAndLogOutput(ExpandConstant('{cmd}'),
+          '/C ""' + ExpandConstant('{app}') + '\setup_env.cmd""', '',
+          SW_HIDE, ewWaitUntilTerminated, ResultCode, @OnPixiLine);
+    finally
+      if not WizardSilent then
+        EnvProgressPage.Hide;
+    end;
+    if (not ExecOk) or (ResultCode <> 0) then
     begin
       SuppressibleMsgBox('Environment setup failed (exit code '
         + IntToStr(ResultCode) + '). Check your internet connection, then '
