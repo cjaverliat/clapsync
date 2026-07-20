@@ -56,7 +56,6 @@ const
   { setup_env.cmd sets this exact console title; Cancel finds the window by
     it to close it. }
   EnvConsoleTitle = 'clapsync environment setup';
-  WM_CLOSE_ = $0010;
   PM_REMOVE = 1;
   SW_SHOWNOACTIVATE_ = 4;   { show the console without stealing focus }
 
@@ -79,8 +78,6 @@ function GetTickCount: LongWord;
   external 'GetTickCount@kernel32.dll stdcall';
 function FindWindowByTitle(ClassName, WindowName: String): LongWord;
   external 'FindWindowW@user32.dll stdcall';
-function PostMessageW(Wnd, Msg, WParam, LParam: LongWord): Boolean;
-  external 'PostMessageW@user32.dll stdcall';
 function SetForegroundWindow(Wnd: LongWord): Boolean;
   external 'SetForegroundWindow@user32.dll stdcall';
 function PeekMessageW(var lpMsg: TMsg; Wnd, FilterMin, FilterMax,
@@ -107,20 +104,21 @@ begin
     end;
 end;
 
-{ Fires when the user clicks the wizard's standard Cancel button (or closes
-  the window). During env setup, close the console instead of tearing down
-  the wizard: pixi (the console's child) dies, the poll loop below sees the
-  console vanish, and CurStepChanged reports the cancellation. }
+{ Fires when the user clicks the wizard's standard Cancel button. During env
+  setup, kill pixi (taskkill /T ends its child tree too); setup_env.cmd then
+  resumes, writes .setup_result with a nonzero code, and exits, so the poll
+  loop below finishes and CurStepChanged reports the cancellation. }
 procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
 var
-  Wnd: LongWord;
+  ResultCode: Integer;
 begin
   if EnvRunning then
   begin
     EnvCancelRequested := True;
-    Wnd := FindWindowByTitle('ConsoleWindowClass', EnvConsoleTitle);
-    if Wnd <> 0 then
-      PostMessageW(Wnd, WM_CLOSE_, 0, 0);
+    if not WizardSilent then
+      WizardForm.StatusLabel.Caption := 'Cancelling — stopping pixi...';
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM pixi.exe', '',
+      SW_HIDE, ewNoWait, ResultCode);
     Cancel := False;   { we drive the abort ourselves, below }
     Confirm := False;  { no second "Exit Setup?" prompt }
   end;
