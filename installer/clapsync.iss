@@ -26,21 +26,30 @@ SetupIconFile=clapsync.ico
 UninstallDisplayIcon={app}\clapsync.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; Win10 1809+ — the floor for the torch cu130 / PySide6 6.7 runtime.
+MinVersion=10.0.17763
 Compression=lzma2
 SolidCompression=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 
+[InstallDelete]
+; On upgrade, clear the previous env's wheels so an old clapsync/framepipe
+; wheel can't linger beside the new one in the find-links dir.
+Type: filesandordirs; Name: "{app}\app\wheels"
+
 [Files]
-Source: "vendor\pixi.exe"; DestDir: "{app}"
-Source: "launcher.vbs"; DestDir: "{app}"
-Source: "setup_env.cmd"; DestDir: "{app}"
-Source: "console_guard.ps1"; DestDir: "{app}"
-Source: "clapsync.ico"; DestDir: "{app}"
-Source: "pixi.toml"; DestDir: "{app}\app"
-Source: "pixi.lock"; DestDir: "{app}\app"
-Source: "wheels\*"; DestDir: "{app}\app\wheels"
+; ignoreversion: our payload is version-pinned, so always overwrite on
+; upgrade regardless of any embedded file-version resource.
+Source: "vendor\pixi.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "launcher.vbs"; DestDir: "{app}"; Flags: ignoreversion
+Source: "setup_env.cmd"; DestDir: "{app}"; Flags: ignoreversion
+Source: "console_guard.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "clapsync.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "pixi.toml"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "pixi.lock"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "wheels\*"; DestDir: "{app}\app\wheels"; Flags: ignoreversion
 
 [Icons]
 Name: "{userprograms}\clapsync"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\launcher.vbs"""; IconFilename: "{app}\clapsync.ico"
