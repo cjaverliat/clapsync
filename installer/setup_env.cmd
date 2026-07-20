@@ -14,4 +14,8 @@ start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0console_gu
 "%~dp0pixi.exe" install --locked --manifest-path "%~dp0app\pixi.toml"
 set "RC=%ERRORLEVEL%"
 del "%QE_FLAG%" >nul 2>&1
+rem Signal completion + exit code to the installer (it polls this file
+rem while pixi runs so its window stays responsive). Written last, so its
+rem absence means "still running or aborted".
+> "%~dp0.setup_result" echo %RC%
 exit /b %RC%

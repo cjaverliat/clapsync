@@ -53,28 +53,40 @@ Type: filesandordirs; Name: "{app}"
 
 [Code]
 const
-  { setup_env.cmd sets this exact console title; the Cancel button finds the
-    window by it to close it. }
+  { setup_env.cmd sets this exact console title; Cancel finds the window by
+    it to close it. }
   EnvConsoleTitle = 'clapsync environment setup';
   WM_CLOSE_ = $0010;
+  PM_REMOVE = 1;
+
+type
+  TMsg = record
+    hwnd: LongWord;
+    message: LongWord;
+    wParam: LongWord;
+    lParam: LongWord;
+    time: LongWord;
+    pt_x: LongInt;
+    pt_y: LongInt;
+  end;
 
 var
-  EnvStartTick: LongWord;
-  EnvTimer: LongWord;
-  EnvRunning: Boolean;          { true while the env-setup Exec is blocking }
+  EnvRunning: Boolean;          { true while the env-setup process runs }
   EnvCancelRequested: Boolean;
 
-function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
-  TimerFunc: LongWord): LongWord;
-  external 'SetTimer@user32.dll stdcall';
-function KillTimer(Wnd: LongWord; IdEvent: LongWord): LongWord;
-  external 'KillTimer@user32.dll stdcall';
 function GetTickCount: LongWord;
   external 'GetTickCount@kernel32.dll stdcall';
 function FindWindowByTitle(ClassName, WindowName: String): LongWord;
   external 'FindWindowW@user32.dll stdcall';
 function PostMessageW(Wnd, Msg, WParam, LParam: LongWord): Boolean;
   external 'PostMessageW@user32.dll stdcall';
+function PeekMessageW(var lpMsg: TMsg; Wnd, FilterMin, FilterMax,
+  RemoveMsg: LongWord): Boolean;
+  external 'PeekMessageW@user32.dll stdcall';
+function TranslateMessage(const lpMsg: TMsg): Boolean;
+  external 'TranslateMessage@user32.dll stdcall';
+function DispatchMessageW(const lpMsg: TMsg): LongWord;
+  external 'DispatchMessageW@user32.dll stdcall';
 
 function InitializeSetup(): Boolean;
 var
@@ -93,9 +105,9 @@ begin
 end;
 
 { Fires when the user clicks the wizard's standard Cancel button (or closes
-  the window). During env setup, close the console instead of aborting the
-  whole wizard: pixi (the console's child) dies, the blocking Exec below
-  returns, and CurStepChanged handles the cancellation. }
+  the window). During env setup, close the console instead of tearing down
+  the wizard: pixi (the console's child) dies, the poll loop below sees the
+  console vanish, and CurStepChanged reports the cancellation. }
 procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
 var
   Wnd: LongWord;
@@ -111,73 +123,130 @@ begin
   end;
 end;
 
-procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
-  TickCount: LongWord);
+{ Dispatch any pending window messages so the wizard stays responsive (the
+  Cancel button, repaint, marquee) while we wait for pixi. Inno's own loop
+  is blocked inside CurStepChanged, so this is the only pump running. }
+procedure PumpMessages();
 var
-  Secs: LongWord;
+  Msg: TMsg;
 begin
-  Secs := (GetTickCount - EnvStartTick) div 1000;
-  WizardForm.FilenameLabel.Caption :=
-    Format('Elapsed %d:%.2d — live progress in the console window.', [
-      Secs div 60, Secs mod 60]);
+  while PeekMessageW(Msg, 0, 0, 0, PM_REMOVE) do
+  begin
+    TranslateMessage(Msg);
+    DispatchMessageW(Msg);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
+  StartTick, Secs, LastSec: LongWord;
+  ConsoleWnd: LongWord;
+  ResultFile, Params: String;
+  ResultLine: AnsiString;
   ResultCode: Integer;
-  ExecOk: Boolean;
+  Launched, ConsoleSeen, Done, Ok: Boolean;
 begin
-  if CurStep = ssPostInstall then
+  if CurStep <> ssPostInstall then
+    Exit;
+
+  EnvCancelRequested := False;
+  ResultFile := ExpandConstant('{app}') + '\.setup_result';
+  DeleteFile(ResultFile);
+  Params := '/C ""' + ExpandConstant('{app}') + '\setup_env.cmd""';
+
+  if not WizardSilent then
   begin
-    EnvCancelRequested := False;
-    if not WizardSilent then
-    begin
-      EnvStartTick := GetTickCount;
-      { Marquee on the standard install page = honest "working" animation,
-        not a (wrong) percentage. }
-      WizardForm.ProgressGauge.Style := npbstMarquee;
-      WizardForm.StatusLabel.Caption :=
-        'Installing the Python/CUDA environment (~2 GB download)...';
-      { 1 Hz elapsed-clock refresh via a Wnd=0 timer, which fires through
-        the message pump Inno keeps running during the Exec wait — the same
-        pump that delivers the Cancel button click. }
-      EnvTimer := SetTimer(0, 0, 1000, CreateCallback(@EnvTimerProc));
-    end;
-    EnvRunning := True;
-    try
-      { Visible console: a real tty, so pixi renders its own per-package
-        progress there. The window is closable (no close-button lock) so
-        the user can abort; setup_env.cmd disables QuickEdit so a stray
-        click doesn't freeze the output. }
-      ExecOk := Exec(ExpandConstant('{cmd}'),
-          '/C ""' + ExpandConstant('{app}') + '\setup_env.cmd""', '',
-          SW_SHOW, ewWaitUntilTerminated, ResultCode);
-    finally
-      EnvRunning := False;
-      if EnvTimer <> 0 then
+    { Marquee on the standard install page = honest "working" animation,
+      not a (wrong) percentage. }
+    WizardForm.ProgressGauge.Style := npbstMarquee;
+    WizardForm.StatusLabel.Caption :=
+      'Installing the Python/CUDA environment (~2 GB download)...';
+  end;
+
+  { Launch pixi NON-blocking so the wizard message loop stays alive; a
+    blocking Exec would freeze the whole UI (no Cancel) for the entire
+    install. setup_env.cmd writes its exit code to .setup_result when it
+    finishes. Visible console: a real tty, so pixi renders its own
+    per-package progress; the window is closable and QuickEdit is disabled
+    (no click-to-freeze). }
+  EnvRunning := True;
+  Launched := Exec(ExpandConstant('{cmd}'), Params, '', SW_SHOW, ewNoWait,
+    ResultCode);
+
+  StartTick := GetTickCount;
+  LastSec := 999999;
+  ConsoleSeen := False;
+  Done := False;
+  Ok := False;
+  ResultCode := 1;
+
+  if not Launched then
+    Done := True
+  else
+    repeat
+      PumpMessages();
+      Sleep(50);
+
+      if (not WizardSilent) then
       begin
-        KillTimer(0, EnvTimer);
-        EnvTimer := 0;
+        Secs := (GetTickCount - StartTick) div 1000;
+        if Secs <> LastSec then
+        begin
+          WizardForm.FilenameLabel.Caption := Format('Elapsed %d:%.2d — '
+            + 'live progress in the console window.', [Secs div 60,
+            Secs mod 60]);
+          LastSec := Secs;
+        end;
       end;
-      if not WizardSilent then
-        WizardForm.ProgressGauge.Style := npbstNormal;
-    end;
-    if EnvCancelRequested then
-    begin
-      SuppressibleMsgBox('Installation cancelled. Re-run the installer to '
-        + 'finish setting up clapsync.', mbInformation, MB_OK, IDOK);
-      Abort;
-    end
-    else if (not ExecOk) or (ResultCode <> 0) then
-    begin
-      SuppressibleMsgBox('Environment setup did not complete (exit code '
-        + IntToStr(ResultCode) + '). Check your internet connection, then '
-        + 'rerun ' + ExpandConstant('{app}') + '\setup_env.cmd.',
-        mbError, MB_OK, IDOK);
-      { Files are already copied at ssPostInstall — Abort marks the setup
-        as failed (nonzero exit) but does not roll them back. Rerunning
-        the installer or setup_env.cmd repairs the install. }
-      Abort;
-    end;
+
+      if FileExists(ResultFile) then
+      begin
+        { Normal completion: setup_env.cmd wrote its exit code. }
+        if LoadStringFromFile(ResultFile, ResultLine)
+           and (Trim(ResultLine) <> '') then
+        begin
+          ResultCode := StrToIntDef(Trim(ResultLine), 1);
+          Ok := True;
+          Done := True;
+        end;
+      end
+      else
+      begin
+        { No result yet. If the console has appeared and then vanished
+          without writing one, the user closed it (or Cancel did) — abort. }
+        ConsoleWnd := FindWindowByTitle('ConsoleWindowClass',
+          EnvConsoleTitle);
+        if ConsoleWnd <> 0 then
+          ConsoleSeen := True
+        else if ConsoleSeen then
+          Done := True
+        else if (GetTickCount - StartTick) > 20000 then
+          { console never appeared in 20 s — treat as a failed launch
+            rather than looping forever. }
+          Done := True;
+      end;
+    until Done;
+
+  EnvRunning := False;
+  DeleteFile(ResultFile);
+  if not WizardSilent then
+    WizardForm.ProgressGauge.Style := npbstNormal;
+
+  if EnvCancelRequested then
+  begin
+    SuppressibleMsgBox('Installation cancelled. Re-run the installer to '
+      + 'finish setting up clapsync.', mbInformation, MB_OK, IDOK);
+    Abort;
+  end
+  else if (not Ok) or (ResultCode <> 0) then
+  begin
+    SuppressibleMsgBox('Environment setup did not complete (exit code '
+      + IntToStr(ResultCode) + '). Check your internet connection, then '
+      + 'rerun ' + ExpandConstant('{app}') + '\setup_env.cmd.',
+      mbError, MB_OK, IDOK);
+    { Files are already copied at ssPostInstall — Abort marks the setup as
+      failed but does not roll them back. Rerunning the installer or
+      setup_env.cmd repairs the install. }
+    Abort;
   end;
 end;
