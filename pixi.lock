@@ -970,8 +970,8 @@ packages:
   requires_python: '>=3.9'
 - pypi: ./
   name: clapsync
-  version: 0.3.0
-  sha256: 9b0cd2d16c43ace6f84396aac6c55c7a9df050986460cbdb1bde4ac3b8480c41
+  version: 0.3.1
+  sha256: 29bb9b4c6f55b837515132daf655f8d844e2cd13b29943f82579dd2dafa90585
   requires_dist:
   - numpy
   - torch>=2.11

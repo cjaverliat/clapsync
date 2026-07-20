@@ -1,6 +1,6 @@
 [project]
 name = "clapsync"
-version = "0.3.0"
+version = "0.3.1"
 description = "Multi-camera audio-based synchronization and trimming tool"
 requires-python = ">=3.10,<3.13"
 # Abstract runtime deps for consumers. Media I/O is framepipe (video decode)
