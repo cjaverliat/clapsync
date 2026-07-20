@@ -130,7 +130,7 @@ pixi with a hidden window:
 ```vbscript
 Set shell = CreateObject("WScript.Shell")
 appDir = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\"))
-shell.Run """" & appDir & "pixi.exe"" run --frozen --manifest-path """ & appDir & "app\pyproject.toml"" clapsync-gui", 0, False
+shell.Run """" & appDir & "pixi.exe"" run --frozen --manifest-path """ & appDir & "app\pixi.toml"" clapsync-gui", 0, False
 ```
 
 `--manifest-path` makes the launcher working-directory independent;
@@ -149,7 +149,7 @@ scope for v1.
 - `[Run]` (waituntilterminated, console visible so pixi progress is honest):
 
   ```
-  {app}\pixi.exe install --locked --manifest-path {app}\app\pyproject.toml
+  {app}\pixi.exe install --locked --manifest-path {app}\app\pixi.toml
   ```
 
   with `CONDA_OVERRIDE_CUDA=13.0` and `PIXI_CACHE_DIR={app}\cache` set for
@@ -198,7 +198,7 @@ On a clean Windows box (Windows Sandbox or VM; no Python, git, conda, pixi):
 1. Run `clapsync-setup-<version>.exe /VERYSILENT` → exit code 0.
 2. `%LOCALAPPDATA%\clapsync\app\.pixi\envs\default\` exists;
    `...\Scripts\clapsync-gui.exe` exists.
-3. `pixi.exe run --frozen --manifest-path ...app\pyproject.toml clapsync-cli
+3. `pixi.exe run --frozen --manifest-path ...app\pixi.toml clapsync-cli
    sync <two test clips>` → exit 0, prints offsets (proves torch, PyAV,
    framepipe, ffmpeg DLLs all resolve).
 4. GUI smoke: `pixi.exe run --frozen ... python -c "import

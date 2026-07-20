@@ -137,6 +137,9 @@ Python/CUDA environment (~2 GB download, ~8 GB on disk) at install time, so
 internet is required during install. No NVIDIA GPU is needed to install;
 without one, clapsync runs on the CPU (slower sync and export).
 
+The installer is unsigned, so Windows SmartScreen shows an "unrecognized
+app" warning on first run — choose **More info → Run anyway**.
+
 ## Layout
 
 ```
