@@ -58,6 +58,7 @@ const
   EnvConsoleTitle = 'clapsync environment setup';
   WM_CLOSE_ = $0010;
   PM_REMOVE = 1;
+  SW_SHOWNOACTIVATE_ = 4;   { show the console without stealing focus }
 
 type
   TMsg = record
@@ -80,6 +81,8 @@ function FindWindowByTitle(ClassName, WindowName: String): LongWord;
   external 'FindWindowW@user32.dll stdcall';
 function PostMessageW(Wnd, Msg, WParam, LParam: LongWord): Boolean;
   external 'PostMessageW@user32.dll stdcall';
+function SetForegroundWindow(Wnd: LongWord): Boolean;
+  external 'SetForegroundWindow@user32.dll stdcall';
 function PeekMessageW(var lpMsg: TMsg; Wnd, FilterMin, FilterMax,
   RemoveMsg: LongWord): Boolean;
   external 'PeekMessageW@user32.dll stdcall';
@@ -161,17 +164,23 @@ begin
     WizardForm.ProgressGauge.Style := npbstMarquee;
     WizardForm.StatusLabel.Caption :=
       'Installing the Python/CUDA environment (~2 GB download)...';
+    { Inno disables Cancel once files are copied (ssPostInstall); re-enable
+      it so the user can abort the environment setup. }
+    WizardForm.CancelButton.Enabled := True;
   end;
 
   { Launch pixi NON-blocking so the wizard message loop stays alive; a
     blocking Exec would freeze the whole UI (no Cancel) for the entire
     install. setup_env.cmd writes its exit code to .setup_result when it
-    finishes. Visible console: a real tty, so pixi renders its own
-    per-package progress; the window is closable and QuickEdit is disabled
-    (no click-to-freeze). }
+    finishes. SW_SHOWNOACTIVATE shows the console without stealing focus, so
+    the wizard stays active and its Cancel button stays directly clickable;
+    the console is a real tty (pixi renders its own progress), closable, and
+    QuickEdit-guarded (no click-to-freeze). }
   EnvRunning := True;
-  Launched := Exec(ExpandConstant('{cmd}'), Params, '', SW_SHOW, ewNoWait,
-    ResultCode);
+  Launched := Exec(ExpandConstant('{cmd}'), Params, '', SW_SHOWNOACTIVATE_,
+    ewNoWait, ResultCode);
+  if (not WizardSilent) and Launched then
+    SetForegroundWindow(WizardForm.Handle);
 
   StartTick := GetTickCount;
   LastSec := 999999;
@@ -189,6 +198,7 @@ begin
 
       if (not WizardSilent) then
       begin
+        WizardForm.CancelButton.Enabled := True;
         Secs := (GetTickCount - StartTick) div 1000;
         if Secs <> LastSec then
         begin
