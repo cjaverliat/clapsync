@@ -73,6 +73,7 @@ type
 var
   EnvRunning: Boolean;          { true while the env-setup process runs }
   EnvCancelRequested: Boolean;
+  OrigCancelOnClick: TNotifyEvent;
 
 function GetTickCount: LongWord;
   external 'GetTickCount@kernel32.dll stdcall';
@@ -104,21 +105,38 @@ begin
     end;
 end;
 
-{ Fires when the user clicks the wizard's standard Cancel button. During env
-  setup, kill pixi (taskkill /T ends its child tree too); setup_env.cmd then
+{ Kill pixi (taskkill /T ends its child tree too); setup_env.cmd then
   resumes, writes .setup_result with a nonzero code, and exits, so the poll
   loop below finishes and CurStepChanged reports the cancellation. }
-procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
+procedure DoEnvCancel();
 var
   ResultCode: Integer;
 begin
-  if EnvRunning then
+  if EnvRunning and (not EnvCancelRequested) then
   begin
     EnvCancelRequested := True;
     if not WizardSilent then
-      WizardForm.StatusLabel.Caption := 'Cancelling — stopping pixi...';
+      WizardForm.StatusLabel.Caption := 'Cancelling - stopping pixi...';
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM pixi.exe', '',
       SW_HIDE, ewNoWait, ResultCode);
+  end;
+end;
+
+{ Our own handler on the Cancel button. During env setup Inno wires the
+  button to an internal flag its install loop checks — which never runs
+  while we block in CurStepChanged — so the CancelButtonClick event does
+  not fire. Overriding OnClick makes a click call us directly. }
+procedure EnvCancelClick(Sender: TObject);
+begin
+  DoEnvCancel();
+end;
+
+{ Still fires for the wizard window's own close/Esc. }
+procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
+begin
+  if EnvRunning then
+  begin
+    DoEnvCancel();
     Cancel := False;   { we drive the abort ourselves, below }
     Confirm := False;  { no second "Exit Setup?" prompt }
   end;
@@ -163,8 +181,11 @@ begin
     WizardForm.StatusLabel.Caption :=
       'Installing the Python/CUDA environment (~2 GB download)...';
     { Inno disables Cancel once files are copied (ssPostInstall); re-enable
-      it so the user can abort the environment setup. }
+      it so the user can abort the environment setup, and point its OnClick
+      at our handler (see EnvCancelClick). }
     WizardForm.CancelButton.Enabled := True;
+    OrigCancelOnClick := WizardForm.CancelButton.OnClick;
+    WizardForm.CancelButton.OnClick := @EnvCancelClick;
   end;
 
   { Launch pixi NON-blocking so the wizard message loop stays alive; a
@@ -238,7 +259,10 @@ begin
   EnvRunning := False;
   DeleteFile(ResultFile);
   if not WizardSilent then
+  begin
     WizardForm.ProgressGauge.Style := npbstNormal;
+    WizardForm.CancelButton.OnClick := OrigCancelOnClick;
+  end;
 
   if EnvCancelRequested then
   begin
