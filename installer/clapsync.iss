@@ -2,9 +2,9 @@
 ; Compiled by installer/build.py: ISCC /DAppVersion=<ver> clapsync.iss
 ; Installs per-user, then runs setup_env.cmd (pixi install --locked) to
 ; materialize the Python/CUDA environment (~2 GB download, ~8.4 GB on disk).
-; pixi runs in its own visible console (a real tty, so it renders its own
-; per-package progress); the console is guarded: QuickEdit and Ctrl+C are
-; disabled by setup_env.cmd, and the close button is removed below.
+; pixi runs in its own visible console and renders its real per-package
+; progress there. The console is closable and a Cancel button on the wizard
+; stops it too; setup_env.cmd still disables click-to-freeze (QuickEdit).
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -39,7 +39,6 @@ Source: "console_guard.ps1"; DestDir: "{app}"
 Source: "clapsync.ico"; DestDir: "{app}"
 Source: "pixi.toml"; DestDir: "{app}\app"
 Source: "pixi.lock"; DestDir: "{app}\app"
-Source: "env_packages.txt"; DestDir: "{app}\app"
 Source: "wheels\*"; DestDir: "{app}\app\wheels"
 
 [Icons]
@@ -47,32 +46,23 @@ Name: "{userprograms}\clapsync"; Filename: "{sys}\wscript.exe"; Parameters: """{
 Name: "{userdesktop}\clapsync"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\launcher.vbs"""; IconFilename: "{app}\clapsync.ico"; Tasks: desktopicon
 
 [UninstallDelete]
-; The pixi env (~10 GB) and cache are created post-install, so Inno doesn't
+; The pixi env (~8.4 GB) and cache are created post-install, so Inno doesn't
 ; track them — delete the whole tree explicitly.
 Type: filesandordirs; Name: "{app}"
 
 [Code]
 const
-  { Disk footprint of the finished env, in MB. Calibrated against a real
-    cold install measured at 8.38 GiB (2026-07-17, lock for 0.2.0). Drives
-    the smooth bar; re-measure %LOCALAPPDATA%\clapsync when the lock changes
-    materially. }
-  EnvTotalMB = 8581;
-  { setup_env.cmd sets this exact console title; the timer below finds the
-    window by it to strip the close button (which also disables Alt+F4). }
+  { setup_env.cmd sets this exact console title; the Cancel button finds the
+    window by it to close it. }
   EnvConsoleTitle = 'clapsync environment setup';
-  SC_CLOSE_ = $F060;
-  MF_BYCOMMAND_ = 0;
+  WM_CLOSE_ = $0010;
 
 var
-  EnvProgressPage: TOutputProgressWizardPage;
+  EnvPage: TOutputProgressWizardPage;
+  EnvCancelButton: TNewButton;
   EnvStartTick: LongWord;
   EnvTimer: LongWord;
-  EnvConsoleGuarded: Boolean;
-  EnvPkgLines: TArrayOfString;   { "kind|name|size_bytes", largest first }
-  EnvPkgTotal: Integer;          { parseable line count }
-  EnvFreeAtStart: Int64;
-  EnvCondaMeta, EnvSitePkgs: String;
+  EnvCancelRequested: Boolean;
 
 function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
   TimerFunc: LongWord): LongWord;
@@ -83,10 +73,8 @@ function GetTickCount: LongWord;
   external 'GetTickCount@kernel32.dll stdcall';
 function FindWindowByTitle(ClassName, WindowName: String): LongWord;
   external 'FindWindowW@user32.dll stdcall';
-function GetSystemMenu(Wnd: LongWord; Revert: LongWord): LongWord;
-  external 'GetSystemMenu@user32.dll stdcall';
-function DeleteMenu(Menu: LongWord; Position, Flags: LongWord): LongWord;
-  external 'DeleteMenu@user32.dll stdcall';
+function PostMessageW(Wnd, Msg, WParam, LParam: LongWord): Boolean;
+  external 'PostMessageW@user32.dll stdcall';
 
 function InitializeSetup(): Boolean;
 var
@@ -104,170 +92,75 @@ begin
     end;
 end;
 
+procedure EnvCancelClick(Sender: TObject);
+var
+  Wnd: LongWord;
+begin
+  EnvCancelRequested := True;
+  EnvCancelButton.Enabled := False;
+  EnvCancelButton.Caption := 'Cancelling...';
+  { Close the setup console; pixi (its child) dies and the blocking Exec
+    below returns. Same effect as the user closing the console window. }
+  Wnd := FindWindowByTitle('ConsoleWindowClass', EnvConsoleTitle);
+  if Wnd <> 0 then
+    PostMessageW(Wnd, WM_CLOSE_, 0, 0);
+end;
+
 procedure InitializeWizard();
 begin
-  EnvProgressPage := CreateOutputProgressPage('Setting up the environment',
-    'clapsync is downloading and installing its Python/CUDA packages.');
-end;
-
-{ A package name normalized into a FindFirst mask stem: '-', '_' and '.'
-  all become '?' (one char) so the manifest name (pixi's normalized,
-  lower-case form) matches the on-disk marker (e.g. pyside6_addons ->
-  PySide6_Addons, typing-extensions -> typing_extensions). }
-function MaskStem(const Name: String): String;
-var
-  I: Integer;
-  C: Char;
-begin
-  Result := '';
-  for I := 1 to Length(Name) do
-  begin
-    C := Name[I];
-    if (C = '-') or (C = '_') or (C = '.') then C := '?';
-    Result := Result + C;
-  end;
-end;
-
-{ True if the package left its install marker: conda-meta\<name>-*.json for
-  conda, site-packages\<name>-*.dist-info for pypi. FindFirst is
-  case-insensitive on Windows, so case differences don't matter. }
-function IsPkgInstalled(const Kind, Name: String): Boolean;
-var
-  FR: TFindRec;
-  Mask: String;
-begin
-  if Kind = 'conda' then
-    Mask := EnvCondaMeta + '\' + MaskStem(Name) + '-*.json'
-  else
-    Mask := EnvSitePkgs + '\' + MaskStem(Name) + '-*.dist-info';
-  Result := False;
-  if FindFirst(Mask, FR) then
-  begin
-    Result := True;
-    FindClose(FR);
-  end;
-end;
-
-function HumanSize(Bytes: Int64): String;
-begin
-  if Bytes >= 1073741824 then
-    Result := Format('%.1f GB', [Bytes / 1073741824.0])
-  else if Bytes >= 1048576 then
-    Result := Format('%d MB', [Integer(Bytes div 1048576)])
-  else
-    Result := '';
+  EnvPage := CreateOutputProgressPage('Setting up the environment',
+    'clapsync is installing its Python/CUDA packages. pixi shows live '
+    + 'progress in the console window.');
+  { Marquee = honest "working" animation, not a (wrong) percentage. }
+  EnvPage.ProgressBar.Style := npbstMarquee;
+  EnvCancelButton := TNewButton.Create(WizardForm);
+  EnvCancelButton.Parent := EnvPage.Surface;
+  EnvCancelButton.Width := ScaleX(150);
+  EnvCancelButton.Height := ScaleY(25);
+  EnvCancelButton.Top := EnvPage.ProgressBar.Top
+    + EnvPage.ProgressBar.Height + ScaleY(18);
+  EnvCancelButton.Left := 0;
+  EnvCancelButton.Caption := 'Cancel installation';
+  EnvCancelButton.OnClick := @EnvCancelClick;
 end;
 
 procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
   TickCount: LongWord);
 var
   Secs: LongWord;
-  ConsoleWnd: LongWord;
-  FreeNow, TotalDisk: Int64;
-  UsedMB, Done, I, P1, P2: Integer;
-  PkgName, Kind, Rest, Name, SizeStr: String;
 begin
-  { The console appears shortly after Exec starts and only then gets its
-    title (set by setup_env.cmd) — so the guard is applied from here,
-    first tick that finds it. Classic conhost only; under Windows
-    Terminal the lookup misses and the guard is skipped. }
-  if not EnvConsoleGuarded then
-  begin
-    ConsoleWnd := FindWindowByTitle('ConsoleWindowClass', EnvConsoleTitle);
-    if ConsoleWnd <> 0 then
-    begin
-      DeleteMenu(GetSystemMenu(ConsoleWnd, 0), SC_CLOSE_, MF_BYCOMMAND_);
-      EnvConsoleGuarded := True;
-    end;
-  end;
-
   Secs := (GetTickCount - EnvStartTick) div 1000;
-
-  { Smooth bar from bytes written to disk — moves continuously even during
-    a single large download (torch), which a package-completion bar can't. }
-  UsedMB := 0;
-  if (EnvFreeAtStart > 0)
-     and GetSpaceOnDisk64(ExpandConstant('{localappdata}'), FreeNow,
-       TotalDisk)
-     and (EnvFreeAtStart > FreeNow) then
-    UsedMB := Integer((EnvFreeAtStart - FreeNow) div 1048576);
-  if UsedMB > (EnvTotalMB * 99) div 100 then
-    UsedMB := (EnvTotalMB * 99) div 100;
-  EnvProgressPage.SetProgress(UsedMB, EnvTotalMB);
-
-  { One pass over the manifest (sorted largest first): count installed, and
-    take the first NOT-installed as the current package. That is the
-    biggest package still missing — during a long stall it is the one being
-    downloaded (e.g. torch), which newest-created-dir gets wrong because the
-    in-flight download has no dir yet. }
-  Done := 0;
-  PkgName := '';
-  for I := 0 to GetArrayLength(EnvPkgLines) - 1 do
-  begin
-    P1 := Pos('|', EnvPkgLines[I]);
-    if P1 = 0 then Continue;
-    Kind := Copy(EnvPkgLines[I], 1, P1 - 1);
-    Rest := Copy(EnvPkgLines[I], P1 + 1, Length(EnvPkgLines[I]));
-    P2 := Pos('|', Rest);
-    Name := Copy(Rest, 1, P2 - 1);
-    if IsPkgInstalled(Kind, Name) then
-      Done := Done + 1
-    else if PkgName = '' then
-    begin
-      SizeStr := HumanSize(StrToInt64Def(Copy(Rest, P2 + 1, Length(Rest)), 0));
-      if SizeStr <> '' then
-        PkgName := Name + ' (' + SizeStr + ')'
-      else
-        PkgName := Name;
-    end;
-  end;
-  if PkgName = '' then PkgName := 'finishing up';
-
-  EnvProgressPage.SetText(
-    Format('Package %d of %d  —  installing %s', [Done, EnvPkgTotal, PkgName]),
-    Format('Elapsed %d:%.2d', [Secs div 60, Secs mod 60]));
+  EnvPage.SetText(
+    'Installing the Python/CUDA environment (~2 GB download).',
+    Format('Elapsed %d:%.2d — live progress in the console window.', [
+      Secs div 60, Secs mod 60]));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   ExecOk: Boolean;
-  EnvRoot: String;
-  FreeTotal: Int64;
-  I: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
+    EnvCancelRequested := False;
     if not WizardSilent then
     begin
       EnvStartTick := GetTickCount;
-      EnvConsoleGuarded := False;
-      EnvRoot := ExpandConstant('{app}') + '\app\.pixi\envs\default';
-      EnvCondaMeta := EnvRoot + '\conda-meta';
-      EnvSitePkgs := EnvRoot + '\Lib\site-packages';
-      SetArrayLength(EnvPkgLines, 0);
-      EnvPkgTotal := 0;
-      if LoadStringsFromFile(ExpandConstant('{app}') + '\app\env_packages.txt',
-          EnvPkgLines) then
-        for I := 0 to GetArrayLength(EnvPkgLines) - 1 do
-          if Pos('|', EnvPkgLines[I]) > 0 then
-            EnvPkgTotal := EnvPkgTotal + 1;
-      EnvFreeAtStart := 0;
-      if not GetSpaceOnDisk64(ExpandConstant('{localappdata}'),
-          EnvFreeAtStart, FreeTotal) then
-        EnvFreeAtStart := 0;
-      EnvProgressPage.SetProgress(0, EnvTotalMB);
-      EnvProgressPage.SetText('Starting pixi...', '');
-      EnvProgressPage.Show;
-      { 1 Hz refresh via Wnd=0 timer: fires through the message pump,
-        which Inno keeps running during Exec waits. }
+      EnvCancelButton.Enabled := True;
+      EnvCancelButton.Caption := 'Cancel installation';
+      EnvPage.SetText('Starting pixi...', '');
+      EnvPage.Show;
+      { 1 Hz elapsed-clock refresh via a Wnd=0 timer, which fires through
+        the message pump Inno keeps running during the Exec wait — the same
+        pump that delivers the Cancel button click. }
       EnvTimer := SetTimer(0, 0, 1000, CreateCallback(@EnvTimerProc));
     end;
     try
       { Visible console: a real tty, so pixi renders its own per-package
-        progress there (piping the output would silence it). setup_env.cmd
-        disables QuickEdit (click-freeze) and Ctrl+C; the timer removes
-        the close button. }
+        progress there. The window is closable (no close-button lock) so
+        the user can abort; setup_env.cmd disables QuickEdit so a stray
+        click doesn't freeze the output. }
       ExecOk := Exec(ExpandConstant('{cmd}'),
           '/C ""' + ExpandConstant('{app}') + '\setup_env.cmd""', '',
           SW_SHOW, ewWaitUntilTerminated, ResultCode);
@@ -278,11 +171,17 @@ begin
         EnvTimer := 0;
       end;
       if not WizardSilent then
-        EnvProgressPage.Hide;
+        EnvPage.Hide;
     end;
-    if (not ExecOk) or (ResultCode <> 0) then
+    if EnvCancelRequested then
     begin
-      SuppressibleMsgBox('Environment setup failed (exit code '
+      SuppressibleMsgBox('Installation cancelled. Re-run the installer to '
+        + 'finish setting up clapsync.', mbInformation, MB_OK, IDOK);
+      Abort;
+    end
+    else if (not ExecOk) or (ResultCode <> 0) then
+    begin
+      SuppressibleMsgBox('Environment setup did not complete (exit code '
         + IntToStr(ResultCode) + '). Check your internet connection, then '
         + 'rerun ' + ExpandConstant('{app}') + '\setup_env.cmd.',
         mbError, MB_OK, IDOK);

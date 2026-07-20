@@ -9,7 +9,6 @@ Run from the dev environment: pixi run build-installer
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -70,31 +69,6 @@ def relock() -> None:
          INSTALLER / "pixi.toml"])
 
 
-def write_env_packages() -> None:
-    """Writes env_packages.txt: the locked package set for install progress.
-
-    `pixi list --locked --json` resolves the lock without a materialized
-    env, so this runs on the build machine. The installer ships the result
-    and uses it to show a determinate "N of M packages" during setup. One
-    line per package: "kind|name|size_bytes" (size may be empty for local
-    wheels). The line count is the package total.
-    """
-    print("+ pixi list --locked --json", flush=True)
-    proc = subprocess.run(
-        [str(VENDOR / "pixi.exe"), "list", "--locked", "--json",
-         "--manifest-path", str(INSTALLER / "pixi.toml")],
-        check=True, capture_output=True, text=True)
-    packages = json.loads(proc.stdout)
-    # Largest first so the installer can name the biggest not-yet-installed
-    # package as the current one (the long download stalls are the big ones).
-    packages.sort(key=lambda p: p.get("size_bytes") or 0, reverse=True)
-    lines = [f"{p['kind']}|{p['name']}|{p.get('size_bytes') or ''}"
-             for p in packages]
-    (INSTALLER / "env_packages.txt").write_text(
-        "\n".join(lines) + "\n", encoding="utf-8")
-    print(f"  wrote env_packages.txt ({len(lines)} packages)", flush=True)
-
-
 def app_version() -> str:
     """Reads the clapsync version from the root pyproject."""
     with open(ROOT / "pyproject.toml", "rb") as f:
@@ -121,7 +95,6 @@ def main() -> None:
     build_wheels()
     fetch_pixi()
     relock()
-    write_env_packages()
     compile_installer()
 
 

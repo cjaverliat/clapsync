@@ -21,7 +21,6 @@ dist/
 src/clapsync.egg-info
 installer/wheels/
 installer/vendor/
-installer/env_packages.txt
 
 # python
 **/__pycache__/
