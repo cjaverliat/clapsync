@@ -6,11 +6,54 @@ import signal
 import sys
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from clapsync.gui.video_selection_dialog import VideoSelectionDialog
 
 logger = logging.getLogger(__name__)
+
+
+def _decide_use_proxies(video_paths: list, forced: bool) -> bool:
+    """Return whether to generate preview proxies for this session.
+
+    ``--use_proxies`` forces them on; otherwise proxies are offered (via a
+    prompt) only when a source is tall enough to actually need one — ≤1080p
+    already plays in real time.
+
+    Args:
+        video_paths: Selected input files.
+        forced: True if ``--use_proxies`` was passed.
+    """
+    if forced:
+        return True
+    from clapsync.app.decode import source_needs_preview_proxy
+    from clapsync.app.media import probe
+    if not any(source_needs_preview_proxy(probe(p)) for p in video_paths):
+        return False
+    return _prompt_use_proxies()
+
+
+def _prompt_use_proxies() -> bool:
+    """Ask whether to generate preview proxies; returns True for Yes.
+
+    Shown only when a high-resolution source is detected. Yes is the default
+    (Enter/Escape both select it) and the recommended choice.
+    """
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle("Preview proxies")
+    box.setText(
+        "Some of your videos are higher than 1080p, which can stutter during "
+        "preview playback."
+    )
+    box.setInformativeText(
+        "Generate lightweight 480p preview proxies for smooth playback in the "
+        "editor?\n\nThis is a one-time transcode. Export always uses the "
+        "full-resolution originals."
+    )
+    box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    box.setDefaultButton(QMessageBox.StandardButton.Yes)
+    return box.exec() == QMessageBox.StandardButton.Yes
 
 
 def main() -> None:
@@ -19,8 +62,8 @@ def main() -> None:
     parser.add_argument(
         "--use_proxies",
         action="store_true",
-        help="Transcode a 480p/30fps proxy per source for preview playback "
-        "(faster on high-resolution mosaics; adds a one-time transcode).",
+        help="Force preview proxies without prompting (480p/30fps per source). "
+        "By default clapsync offers proxies only when a source exceeds 1080p.",
     )
     args, qt_args = parser.parse_known_args()
 
@@ -57,14 +100,16 @@ def main() -> None:
     if offsets is None:
         sys.exit(0)
 
-    # With --use_proxies, transcode preview proxies up front behind a progress
-    # bar, so the timeline opens onto warm frames instead of a black "Loading…"
-    # while the decode thread transcodes 5.3K footage.
-    if args.use_proxies and not prepare_proxies_with_progress(video_paths):
+    use_proxies = _decide_use_proxies(video_paths, args.use_proxies)
+
+    # Transcode preview proxies up front behind a progress bar, so the timeline
+    # opens onto warm frames instead of a black "Loading…" while the decode
+    # thread transcodes 5.3K footage.
+    if use_proxies and not prepare_proxies_with_progress(video_paths):
         sys.exit(0)
 
     window = SyncEditorWindow(
-        video_paths=video_paths, offsets=offsets, use_proxies=args.use_proxies
+        video_paths=video_paths, offsets=offsets, use_proxies=use_proxies
     )
     window.showMaximized()
     sys.exit(app.exec())

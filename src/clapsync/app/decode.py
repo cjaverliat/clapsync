@@ -202,6 +202,20 @@ def _cache_store(key: str, wave: torch.Tensor, rate: int) -> None:
         logger.debug("could not write audio cache entry %s", cache_file)
 
 
+def source_needs_preview_proxy(info: media.MediaInfo) -> bool:
+    """Return True if a source is high-res enough to warrant a preview proxy.
+
+    Sources at or below the proxy height threshold play in real time across a
+    mosaic and are used directly; taller footage is transcoded to a light
+    proxy. This is the same test ``ensure_preview_proxy`` applies before
+    transcoding.
+
+    Args:
+        info: Probed source metadata.
+    """
+    return info.kind == "video" and (info.height or 0) > _PROXY_SOURCE_MAX_HEIGHT
+
+
 def ensure_preview_proxy(
     path: Path, progress: Callable[[float], None] | None = None
 ) -> Path:
@@ -229,7 +243,7 @@ def ensure_preview_proxy(
     """
     path = Path(path)
     info = media.probe(path)
-    if info.kind != "video" or (info.height or 0) <= _PROXY_SOURCE_MAX_HEIGHT:
+    if not source_needs_preview_proxy(info):
         if progress is not None:
             progress(1.0)
         return path
