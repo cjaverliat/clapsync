@@ -85,6 +85,9 @@ def write_env_packages() -> None:
          "--manifest-path", str(INSTALLER / "pixi.toml")],
         check=True, capture_output=True, text=True)
     packages = json.loads(proc.stdout)
+    # Largest first so the installer can name the biggest not-yet-installed
+    # package as the current one (the long download stalls are the big ones).
+    packages.sort(key=lambda p: p.get("size_bytes") or 0, reverse=True)
     lines = [f"{p['kind']}|{p['name']}|{p.get('size_bytes') or ''}"
              for p in packages]
     (INSTALLER / "env_packages.txt").write_text(

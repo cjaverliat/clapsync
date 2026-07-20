@@ -69,9 +69,10 @@ var
   EnvStartTick: LongWord;
   EnvTimer: LongWord;
   EnvConsoleGuarded: Boolean;
-  EnvPkgTotal: Integer;         { package count from env_packages.txt }
+  EnvPkgLines: TArrayOfString;   { "kind|name|size_bytes", largest first }
+  EnvPkgTotal: Integer;          { parseable line count }
   EnvFreeAtStart: Int64;
-  EnvCondaMeta, EnvSitePkgs, EnvCacheDir: String;
+  EnvCondaMeta, EnvSitePkgs: String;
 
 function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
   TimerFunc: LongWord): LongWord;
@@ -109,58 +110,52 @@ begin
     'clapsync is downloading and installing its Python/CUDA packages.');
 end;
 
-{ Count of filesystem entries matching Mask (e.g. dir\*.json), excluding
-  . and .. — each installed conda package leaves one conda-meta\*.json and
-  each pypi package one site-packages\*.dist-info, so this counts progress
-  without matching names. }
-function CountMatches(const Mask: String): Integer;
+{ A package name normalized into a FindFirst mask stem: '-', '_' and '.'
+  all become '?' (one char) so the manifest name (pixi's normalized,
+  lower-case form) matches the on-disk marker (e.g. pyside6_addons ->
+  PySide6_Addons, typing-extensions -> typing_extensions). }
+function MaskStem(const Name: String): String;
+var
+  I: Integer;
+  C: Char;
+begin
+  Result := '';
+  for I := 1 to Length(Name) do
+  begin
+    C := Name[I];
+    if (C = '-') or (C = '_') or (C = '.') then C := '?';
+    Result := Result + C;
+  end;
+end;
+
+{ True if the package left its install marker: conda-meta\<name>-*.json for
+  conda, site-packages\<name>-*.dist-info for pypi. FindFirst is
+  case-insensitive on Windows, so case differences don't matter. }
+function IsPkgInstalled(const Kind, Name: String): Boolean;
 var
   FR: TFindRec;
+  Mask: String;
 begin
-  Result := 0;
+  if Kind = 'conda' then
+    Mask := EnvCondaMeta + '\' + MaskStem(Name) + '-*.json'
+  else
+    Mask := EnvSitePkgs + '\' + MaskStem(Name) + '-*.dist-info';
+  Result := False;
   if FindFirst(Mask, FR) then
-  try
-    repeat
-      if (FR.Name <> '.') and (FR.Name <> '..') then
-        Result := Result + 1;
-    until not FindNext(FR);
-  finally
+  begin
+    Result := True;
     FindClose(FR);
   end;
 end;
 
-{ Newest-created subdirectory of Dir, with its name shortened to the part
-  before the first '-' (e.g. torch-2.11.0+cu130.dist-info -> torch). }
-function NewestPkgName(const Dir: String): String;
-var
-  FR: TFindRec;
-  Newest: TFileTime;
-  Name: String;
-  Dash: Integer;
+function HumanSize(Bytes: Int64): String;
 begin
-  Result := '';
-  Newest.dwLowDateTime := 0; Newest.dwHighDateTime := 0;
-  if FindFirst(Dir + '\*', FR) then
-  try
-    repeat
-      if (FR.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0)
-         and (FR.Name <> '.') and (FR.Name <> '..')
-         and ((FR.CreationTime.dwHighDateTime > Newest.dwHighDateTime)
-              or ((FR.CreationTime.dwHighDateTime = Newest.dwHighDateTime)
-                  and (FR.CreationTime.dwLowDateTime > Newest.dwLowDateTime))) then
-      begin
-        Newest := FR.CreationTime;
-        Name := FR.Name;
-      end;
-    until not FindNext(FR);
-  finally
-    FindClose(FR);
-  end;
-  Dash := Pos('-', Name);
-  if Dash > 1 then
-    Result := Copy(Name, 1, Dash - 1)
+  if Bytes >= 1073741824 then
+    Result := Format('%.1f GB', [Bytes / 1073741824.0])
+  else if Bytes >= 1048576 then
+    Result := Format('%d MB', [Integer(Bytes div 1048576)])
   else
-    Result := Name;
+    Result := '';
 end;
 
 procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
@@ -169,8 +164,8 @@ var
   Secs: LongWord;
   ConsoleWnd: LongWord;
   FreeNow, TotalDisk: Int64;
-  UsedMB, Done: Integer;
-  PkgName, DoneText: String;
+  UsedMB, Done, I, P1, P2: Integer;
+  PkgName, Kind, Rest, Name, SizeStr: String;
 begin
   { The console appears shortly after Exec starts and only then gets its
     title (set by setup_env.cmd) — so the guard is applied from here,
@@ -200,20 +195,36 @@ begin
     UsedMB := (EnvTotalMB * 99) div 100;
   EnvProgressPage.SetProgress(UsedMB, EnvTotalMB);
 
-  { Determinate structure from the package manifest + install markers. }
-  Done := CountMatches(EnvCondaMeta + '\*.json')
-        + CountMatches(EnvSitePkgs + '\*.dist-info');
-  if EnvPkgTotal > 0 then
-    DoneText := Format('Package %d of %d', [Done, EnvPkgTotal])
-  else
-    DoneText := Format('%d packages installed', [Done]);
-
-  PkgName := NewestPkgName(EnvSitePkgs);
-  if PkgName = '' then PkgName := NewestPkgName(EnvCacheDir);
-  if PkgName = '' then PkgName := 'downloading packages';
+  { One pass over the manifest (sorted largest first): count installed, and
+    take the first NOT-installed as the current package. That is the
+    biggest package still missing — during a long stall it is the one being
+    downloaded (e.g. torch), which newest-created-dir gets wrong because the
+    in-flight download has no dir yet. }
+  Done := 0;
+  PkgName := '';
+  for I := 0 to GetArrayLength(EnvPkgLines) - 1 do
+  begin
+    P1 := Pos('|', EnvPkgLines[I]);
+    if P1 = 0 then Continue;
+    Kind := Copy(EnvPkgLines[I], 1, P1 - 1);
+    Rest := Copy(EnvPkgLines[I], P1 + 1, Length(EnvPkgLines[I]));
+    P2 := Pos('|', Rest);
+    Name := Copy(Rest, 1, P2 - 1);
+    if IsPkgInstalled(Kind, Name) then
+      Done := Done + 1
+    else if PkgName = '' then
+    begin
+      SizeStr := HumanSize(StrToInt64Def(Copy(Rest, P2 + 1, Length(Rest)), 0));
+      if SizeStr <> '' then
+        PkgName := Name + ' (' + SizeStr + ')'
+      else
+        PkgName := Name;
+    end;
+  end;
+  if PkgName = '' then PkgName := 'finishing up';
 
   EnvProgressPage.SetText(
-    Format('%s  —  %s', [DoneText, PkgName]),
+    Format('Package %d of %d  —  installing %s', [Done, EnvPkgTotal, PkgName]),
     Format('Elapsed %d:%.2d', [Secs div 60, Secs mod 60]));
 end;
 
@@ -221,9 +232,9 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   ExecOk: Boolean;
-  Lines: TArrayOfString;
   EnvRoot: String;
   FreeTotal: Int64;
+  I: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -234,11 +245,13 @@ begin
       EnvRoot := ExpandConstant('{app}') + '\app\.pixi\envs\default';
       EnvCondaMeta := EnvRoot + '\conda-meta';
       EnvSitePkgs := EnvRoot + '\Lib\site-packages';
-      EnvCacheDir := ExpandConstant('{app}') + '\cache\pkgs';
+      SetArrayLength(EnvPkgLines, 0);
       EnvPkgTotal := 0;
       if LoadStringsFromFile(ExpandConstant('{app}') + '\app\env_packages.txt',
-          Lines) then
-        EnvPkgTotal := GetArrayLength(Lines);
+          EnvPkgLines) then
+        for I := 0 to GetArrayLength(EnvPkgLines) - 1 do
+          if Pos('|', EnvPkgLines[I]) > 0 then
+            EnvPkgTotal := EnvPkgTotal + 1;
       EnvFreeAtStart := 0;
       if not GetSpaceOnDisk64(ExpandConstant('{localappdata}'),
           EnvFreeAtStart, FreeTotal) then
