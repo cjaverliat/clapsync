@@ -3,8 +3,9 @@
 ; Installs per-user, then runs setup_env.cmd (pixi install --locked) to
 ; materialize the Python/CUDA environment (~2 GB download, ~8.4 GB on disk).
 ; pixi runs in its own visible console and renders its real per-package
-; progress there. The console is closable and a Cancel button on the wizard
-; stops it too; setup_env.cmd still disables click-to-freeze (QuickEdit).
+; progress there. The console is closable and the wizard's standard Cancel
+; button stops it too; setup_env.cmd still disables click-to-freeze
+; (QuickEdit).
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -58,10 +59,9 @@ const
   WM_CLOSE_ = $0010;
 
 var
-  EnvPage: TOutputProgressWizardPage;
-  EnvCancelButton: TNewButton;
   EnvStartTick: LongWord;
   EnvTimer: LongWord;
+  EnvRunning: Boolean;          { true while the env-setup Exec is blocking }
   EnvCancelRequested: Boolean;
 
 function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
@@ -92,36 +92,23 @@ begin
     end;
 end;
 
-procedure EnvCancelClick(Sender: TObject);
+{ Fires when the user clicks the wizard's standard Cancel button (or closes
+  the window). During env setup, close the console instead of aborting the
+  whole wizard: pixi (the console's child) dies, the blocking Exec below
+  returns, and CurStepChanged handles the cancellation. }
+procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
 var
   Wnd: LongWord;
 begin
-  EnvCancelRequested := True;
-  EnvCancelButton.Enabled := False;
-  EnvCancelButton.Caption := 'Cancelling...';
-  { Close the setup console; pixi (its child) dies and the blocking Exec
-    below returns. Same effect as the user closing the console window. }
-  Wnd := FindWindowByTitle('ConsoleWindowClass', EnvConsoleTitle);
-  if Wnd <> 0 then
-    PostMessageW(Wnd, WM_CLOSE_, 0, 0);
-end;
-
-procedure InitializeWizard();
-begin
-  EnvPage := CreateOutputProgressPage('Setting up the environment',
-    'clapsync is installing its Python/CUDA packages. pixi shows live '
-    + 'progress in the console window.');
-  { Marquee = honest "working" animation, not a (wrong) percentage. }
-  EnvPage.ProgressBar.Style := npbstMarquee;
-  EnvCancelButton := TNewButton.Create(WizardForm);
-  EnvCancelButton.Parent := EnvPage.Surface;
-  EnvCancelButton.Width := ScaleX(150);
-  EnvCancelButton.Height := ScaleY(25);
-  EnvCancelButton.Top := EnvPage.ProgressBar.Top
-    + EnvPage.ProgressBar.Height + ScaleY(18);
-  EnvCancelButton.Left := 0;
-  EnvCancelButton.Caption := 'Cancel installation';
-  EnvCancelButton.OnClick := @EnvCancelClick;
+  if EnvRunning then
+  begin
+    EnvCancelRequested := True;
+    Wnd := FindWindowByTitle('ConsoleWindowClass', EnvConsoleTitle);
+    if Wnd <> 0 then
+      PostMessageW(Wnd, WM_CLOSE_, 0, 0);
+    Cancel := False;   { we drive the abort ourselves, below }
+    Confirm := False;  { no second "Exit Setup?" prompt }
+  end;
 end;
 
 procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
@@ -130,10 +117,9 @@ var
   Secs: LongWord;
 begin
   Secs := (GetTickCount - EnvStartTick) div 1000;
-  EnvPage.SetText(
-    'Installing the Python/CUDA environment (~2 GB download).',
+  WizardForm.FilenameLabel.Caption :=
     Format('Elapsed %d:%.2d — live progress in the console window.', [
-      Secs div 60, Secs mod 60]));
+      Secs div 60, Secs mod 60]);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -147,15 +133,17 @@ begin
     if not WizardSilent then
     begin
       EnvStartTick := GetTickCount;
-      EnvCancelButton.Enabled := True;
-      EnvCancelButton.Caption := 'Cancel installation';
-      EnvPage.SetText('Starting pixi...', '');
-      EnvPage.Show;
+      { Marquee on the standard install page = honest "working" animation,
+        not a (wrong) percentage. }
+      WizardForm.ProgressGauge.Style := npbstMarquee;
+      WizardForm.StatusLabel.Caption :=
+        'Installing the Python/CUDA environment (~2 GB download)...';
       { 1 Hz elapsed-clock refresh via a Wnd=0 timer, which fires through
         the message pump Inno keeps running during the Exec wait — the same
         pump that delivers the Cancel button click. }
       EnvTimer := SetTimer(0, 0, 1000, CreateCallback(@EnvTimerProc));
     end;
+    EnvRunning := True;
     try
       { Visible console: a real tty, so pixi renders its own per-package
         progress there. The window is closable (no close-button lock) so
@@ -165,13 +153,14 @@ begin
           '/C ""' + ExpandConstant('{app}') + '\setup_env.cmd""', '',
           SW_SHOW, ewWaitUntilTerminated, ResultCode);
     finally
+      EnvRunning := False;
       if EnvTimer <> 0 then
       begin
         KillTimer(0, EnvTimer);
         EnvTimer := 0;
       end;
       if not WizardSilent then
-        EnvPage.Hide;
+        WizardForm.ProgressGauge.Style := npbstNormal;
     end;
     if EnvCancelRequested then
     begin
