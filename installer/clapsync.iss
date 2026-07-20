@@ -39,6 +39,7 @@ Source: "console_guard.ps1"; DestDir: "{app}"
 Source: "clapsync.ico"; DestDir: "{app}"
 Source: "pixi.toml"; DestDir: "{app}\app"
 Source: "pixi.lock"; DestDir: "{app}\app"
+Source: "env_packages.txt"; DestDir: "{app}\app"
 Source: "wheels\*"; DestDir: "{app}\app\wheels"
 
 [Icons]
@@ -52,6 +53,11 @@ Type: filesandordirs; Name: "{app}"
 
 [Code]
 const
+  { Disk footprint of the finished env, in MB. Calibrated against a real
+    cold install measured at 8.38 GiB (2026-07-17, lock for 0.2.0). Drives
+    the smooth bar; re-measure %LOCALAPPDATA%\clapsync when the lock changes
+    materially. }
+  EnvTotalMB = 8581;
   { setup_env.cmd sets this exact console title; the timer below finds the
     window by it to strip the close button (which also disables Alt+F4). }
   EnvConsoleTitle = 'clapsync environment setup';
@@ -63,6 +69,9 @@ var
   EnvStartTick: LongWord;
   EnvTimer: LongWord;
   EnvConsoleGuarded: Boolean;
+  EnvPkgTotal: Integer;         { package count from env_packages.txt }
+  EnvFreeAtStart: Int64;
+  EnvCondaMeta, EnvSitePkgs, EnvCacheDir: String;
 
 function SetTimer(Wnd: LongWord; IdEvent, Elapse: LongWord;
   TimerFunc: LongWord): LongWord;
@@ -97,7 +106,61 @@ end;
 procedure InitializeWizard();
 begin
   EnvProgressPage := CreateOutputProgressPage('Setting up the environment',
-    'pixi shows its progress in the console window next to this one.');
+    'clapsync is downloading and installing its Python/CUDA packages.');
+end;
+
+{ Count of filesystem entries matching Mask (e.g. dir\*.json), excluding
+  . and .. — each installed conda package leaves one conda-meta\*.json and
+  each pypi package one site-packages\*.dist-info, so this counts progress
+  without matching names. }
+function CountMatches(const Mask: String): Integer;
+var
+  FR: TFindRec;
+begin
+  Result := 0;
+  if FindFirst(Mask, FR) then
+  try
+    repeat
+      if (FR.Name <> '.') and (FR.Name <> '..') then
+        Result := Result + 1;
+    until not FindNext(FR);
+  finally
+    FindClose(FR);
+  end;
+end;
+
+{ Newest-created subdirectory of Dir, with its name shortened to the part
+  before the first '-' (e.g. torch-2.11.0+cu130.dist-info -> torch). }
+function NewestPkgName(const Dir: String): String;
+var
+  FR: TFindRec;
+  Newest: TFileTime;
+  Name: String;
+  Dash: Integer;
+begin
+  Result := '';
+  Newest.dwLowDateTime := 0; Newest.dwHighDateTime := 0;
+  if FindFirst(Dir + '\*', FR) then
+  try
+    repeat
+      if (FR.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0)
+         and (FR.Name <> '.') and (FR.Name <> '..')
+         and ((FR.CreationTime.dwHighDateTime > Newest.dwHighDateTime)
+              or ((FR.CreationTime.dwHighDateTime = Newest.dwHighDateTime)
+                  and (FR.CreationTime.dwLowDateTime > Newest.dwLowDateTime))) then
+      begin
+        Newest := FR.CreationTime;
+        Name := FR.Name;
+      end;
+    until not FindNext(FR);
+  finally
+    FindClose(FR);
+  end;
+  Dash := Pos('-', Name);
+  if Dash > 1 then
+    Result := Copy(Name, 1, Dash - 1)
+  else
+    Result := Name;
 end;
 
 procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
@@ -105,6 +168,9 @@ procedure EnvTimerProc(Wnd: LongWord; Msg: LongWord; IdEvent: LongWord;
 var
   Secs: LongWord;
   ConsoleWnd: LongWord;
+  FreeNow, TotalDisk: Int64;
+  UsedMB, Done: Integer;
+  PkgName, DoneText: String;
 begin
   { The console appears shortly after Exec starts and only then gets its
     title (set by setup_env.cmd) — so the guard is applied from here,
@@ -119,17 +185,45 @@ begin
       EnvConsoleGuarded := True;
     end;
   end;
+
   Secs := (GetTickCount - EnvStartTick) div 1000;
+
+  { Smooth bar from bytes written to disk — moves continuously even during
+    a single large download (torch), which a package-completion bar can't. }
+  UsedMB := 0;
+  if (EnvFreeAtStart > 0)
+     and GetSpaceOnDisk64(ExpandConstant('{localappdata}'), FreeNow,
+       TotalDisk)
+     and (EnvFreeAtStart > FreeNow) then
+    UsedMB := Integer((EnvFreeAtStart - FreeNow) div 1048576);
+  if UsedMB > (EnvTotalMB * 99) div 100 then
+    UsedMB := (EnvTotalMB * 99) div 100;
+  EnvProgressPage.SetProgress(UsedMB, EnvTotalMB);
+
+  { Determinate structure from the package manifest + install markers. }
+  Done := CountMatches(EnvCondaMeta + '\*.json')
+        + CountMatches(EnvSitePkgs + '\*.dist-info');
+  if EnvPkgTotal > 0 then
+    DoneText := Format('Package %d of %d', [Done, EnvPkgTotal])
+  else
+    DoneText := Format('%d packages installed', [Done]);
+
+  PkgName := NewestPkgName(EnvSitePkgs);
+  if PkgName = '' then PkgName := NewestPkgName(EnvCacheDir);
+  if PkgName = '' then PkgName := 'downloading packages';
+
   EnvProgressPage.SetText(
-    'pixi is installing the Python/CUDA environment (~2 GB download).',
-    Format('Elapsed %d:%.2d — progress shows in the console window.', [
-      Secs div 60, Secs mod 60]));
+    Format('%s  —  %s', [DoneText, PkgName]),
+    Format('Elapsed %d:%.2d', [Secs div 60, Secs mod 60]));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   ExecOk: Boolean;
+  Lines: TArrayOfString;
+  EnvRoot: String;
+  FreeTotal: Int64;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -137,9 +231,20 @@ begin
     begin
       EnvStartTick := GetTickCount;
       EnvConsoleGuarded := False;
-      EnvProgressPage.SetText(
-        'pixi is installing the Python/CUDA environment (~2 GB download).',
-        'Starting pixi...');
+      EnvRoot := ExpandConstant('{app}') + '\app\.pixi\envs\default';
+      EnvCondaMeta := EnvRoot + '\conda-meta';
+      EnvSitePkgs := EnvRoot + '\Lib\site-packages';
+      EnvCacheDir := ExpandConstant('{app}') + '\cache\pkgs';
+      EnvPkgTotal := 0;
+      if LoadStringsFromFile(ExpandConstant('{app}') + '\app\env_packages.txt',
+          Lines) then
+        EnvPkgTotal := GetArrayLength(Lines);
+      EnvFreeAtStart := 0;
+      if not GetSpaceOnDisk64(ExpandConstant('{localappdata}'),
+          EnvFreeAtStart, FreeTotal) then
+        EnvFreeAtStart := 0;
+      EnvProgressPage.SetProgress(0, EnvTotalMB);
+      EnvProgressPage.SetText('Starting pixi...', '');
       EnvProgressPage.Show;
       { 1 Hz refresh via Wnd=0 timer: fires through the message pump,
         which Inno keeps running during Exec waits. }
