@@ -1,0 +1,66 @@
+name: Build Windows installer
+
+# Builds the online-bootstrap installer and attaches it to the release that
+# triggered the run. Also runnable manually against an existing tag.
+#
+# Requires a repository secret FRAMEPIPE_TOKEN: a PAT (or fine-grained token)
+# with read access to the private cjaverliat/framepipe repo, since the build
+# needs framepipe checked out as a sibling and the default GITHUB_TOKEN only
+# reaches this repo.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to attach the installer to (e.g. v0.3.0)
+        required: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out clapsync
+        uses: actions/checkout@v4
+        with:
+          path: clapsync
+
+      - name: Check out framepipe (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: cjaverliat/framepipe
+          path: framepipe
+          token: ${{ secrets.FRAMEPIPE_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        working-directory: clapsync
+        run: python installer/build.py
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attach installer to release
+        working-directory: clapsync
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" \
+            outputs/clapsync-setup-*.exe \
+            --clobber --repo "${{ github.repository }}"

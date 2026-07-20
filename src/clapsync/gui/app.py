@@ -8,12 +8,7 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QDialog
 
-from clapsync.gui.sync_editor import SyncEditorWindow
 from clapsync.gui.video_selection_dialog import VideoSelectionDialog
-from clapsync.gui.workers import (
-    compute_offsets_with_progress,
-    prepare_proxies_with_progress,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +44,15 @@ def main() -> None:
 
     video_paths = sel.get_video_paths()
 
+    # Deferred: importing these pulls torch/torchaudio/framepipe (~3s + CUDA
+    # init). Keeping them out of module scope lets the selection dialog above
+    # paint instantly instead of after the whole decode stack loads.
+    from clapsync.gui.sync_editor import SyncEditorWindow
+    from clapsync.gui.workers import (
+        compute_offsets_with_progress,
+        prepare_proxies_with_progress,
+    )
+
     offsets = compute_offsets_with_progress(video_paths)
     if offsets is None:
         sys.exit(0)
@@ -62,7 +66,7 @@ def main() -> None:
     window = SyncEditorWindow(
         video_paths=video_paths, offsets=offsets, use_proxies=args.use_proxies
     )
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())
 
 

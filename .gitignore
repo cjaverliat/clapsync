@@ -19,6 +19,8 @@ build/
 dist/
 *.egg-info/
 src/clapsync.egg-info
+installer/wheels/
+installer/vendor/
 
 # python
 **/__pycache__/

@@ -121,6 +121,22 @@ muxing (both GPU-accelerated where applicable); no `ffmpeg` command-line calls.
 pixi run build-clapsync
 ```
 
+## Build the Windows installer
+
+Requires [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+(`winget install JRSoftware.InnoSetup`) and a sibling `../framepipe`
+checkout.
+
+```bash
+pixi run build-installer
+```
+
+Produces `outputs/clapsync-setup-<version>.exe` — a small online installer.
+It installs per-user to `%LOCALAPPDATA%\clapsync`, then downloads the locked
+Python/CUDA environment (~2 GB download, ~8 GB on disk) at install time, so
+internet is required during install. No NVIDIA GPU is needed to install;
+without one, clapsync runs on the CPU (slower sync and export).
+
 ## Layout
 
 ```
