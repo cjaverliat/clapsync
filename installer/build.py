@@ -64,9 +64,19 @@ def fetch_pixi() -> None:
 
 
 def relock() -> None:
-    """Relocks the dist manifest with the vendored pixi."""
-    run([VENDOR / "pixi.exe", "lock", "--manifest-path",
-         INSTALLER / "pixi.toml"])
+    """Relocks the dist manifest with the vendored pixi.
+
+    `pixi lock` is a no-op when the manifest text is unchanged, so it does
+    not notice a rebuilt local wheel whose version changed (a bump would
+    otherwise ship a lock pointing at the old wheel filename, breaking the
+    `--locked` install). `pixi update` on the local packages forces the lock
+    to point at the freshly built clapsync/framepipe wheels.
+    """
+    pixi = VENDOR / "pixi.exe"
+    manifest = INSTALLER / "pixi.toml"
+    run([pixi, "lock", "--manifest-path", manifest])
+    run([pixi, "update", "clapsync", "framepipe", "--manifest-path",
+         manifest])
 
 
 def app_version() -> str:
