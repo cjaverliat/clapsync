@@ -1,9 +1,45 @@
 """Integration tests for clapsync.app.decode."""
+from pathlib import Path
+
 import pytest
 import torch
 from framepipe.metadata import extract_video_metadata
 
-from clapsync.app.decode import ensure_preview_proxy, load_audio
+from clapsync.app.decode import (
+    ensure_preview_proxy,
+    load_audio,
+    source_needs_preview_proxy,
+)
+from clapsync.app.media import MediaInfo
+
+
+def _video_info(height: int) -> MediaInfo:
+    return MediaInfo(
+        path=Path("clip.mp4"),
+        duration=1.0,
+        has_audio=True,
+        kind="video",
+        width=height * 16 // 9,
+        height=height,
+    )
+
+
+def test_source_needs_preview_proxy_above_1080p():
+    assert source_needs_preview_proxy(_video_info(1440))
+
+
+def test_source_needs_preview_proxy_at_1080p_passes_through():
+    assert not source_needs_preview_proxy(_video_info(1080))
+
+
+def test_source_needs_preview_proxy_ignores_audio_only():
+    info = MediaInfo(
+        path=Path("a.wav"),
+        duration=1.0,
+        has_audio=True,
+        kind="audio",
+    )
+    assert not source_needs_preview_proxy(info)
 
 
 @pytest.mark.slow
