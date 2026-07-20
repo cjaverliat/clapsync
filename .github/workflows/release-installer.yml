@@ -20,6 +20,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write   # upload the installer as a release asset
     steps:
       - name: Check out clapsync
         uses: actions/checkout@v4
