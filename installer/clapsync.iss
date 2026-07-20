@@ -35,6 +35,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 Source: "vendor\pixi.exe"; DestDir: "{app}"
 Source: "launcher.vbs"; DestDir: "{app}"
 Source: "setup_env.cmd"; DestDir: "{app}"
+Source: "console_guard.ps1"; DestDir: "{app}"
 Source: "clapsync.ico"; DestDir: "{app}"
 Source: "pixi.toml"; DestDir: "{app}\app"
 Source: "pixi.lock"; DestDir: "{app}\app"
