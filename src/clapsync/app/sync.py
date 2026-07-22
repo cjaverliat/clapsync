@@ -12,6 +12,7 @@ import torch
 
 from clapsync.app.decode import load_audio
 from clapsync.app.media import MediaInfo, probe
+from clapsync.app.mocap_sync import MarkerChoices, bridge_mocap_offsets
 from clapsync.core.offsets import Refine, align_waveforms
 from clapsync.core.solver import Alignment
 
@@ -111,33 +112,112 @@ def offsets_from_media(
     )
 
 
+def align_media(
+    media: list[MediaInfo],
+    *,
+    reference_index: int = 0,
+    refine: Refine = "parabolic",
+    target_rate: int | None = 16000,
+    marker_choices: MarkerChoices | None = None,
+    progress: Callable[[float], None] | None = None,
+    status: Callable[[str], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> Alignment:
+    """Align mixed audio/video and motion-capture tracks on one timeline.
+
+    Audio/video tracks are synced by MFCC cross-correlation; motion-capture
+    (c3d) tracks are bridged onto the same timeline via the clapperboard clap.
+    Results are assembled in the original input order.
+
+    Args:
+        marker_choices: Optional per-track clapperboard marker groups for c3d
+            files whose markers cannot be identified by name (GUI-supplied).
+
+    Returns:
+        Alignment (offsets, confidence, warnings) parallel to ``media``.
+
+    Raises:
+        ValueError: If an audio/video track has no audio stream.
+    """
+    n = len(media)
+    av_idx = [i for i, m in enumerate(media) if m.kind != "mocap"]
+    mocap_idx = [i for i, m in enumerate(media) if m.kind == "mocap"]
+
+    if not mocap_idx:
+        return offsets_from_media(
+            media, reference_index=reference_index, refine=refine,
+            target_rate=target_rate, progress=progress, status=status,
+            is_cancelled=is_cancelled,
+        )
+    if not av_idx:
+        return Alignment(
+            [0.0] * n, [0.0] * n,
+            ["no audio/video track to sync motion capture against"],
+        )
+
+    warnings: list[str] = []
+    if reference_index >= n or media[reference_index].kind == "mocap":
+        reference_index = av_idx[0]
+        warnings.append(
+            "reference is motion capture; using the first audio/video track"
+        )
+
+    av_media = [media[i] for i in av_idx]
+    av_align = offsets_from_media(
+        av_media, reference_index=av_idx.index(reference_index), refine=refine,
+        target_rate=target_rate, progress=progress, status=status,
+        is_cancelled=is_cancelled,
+    )
+
+    if status is not None:
+        status("Detecting clapperboard…")
+    mocap_offsets, mocap_conf, mocap_warn = bridge_mocap_offsets(
+        av_media, av_align, [media[i] for i in mocap_idx], mocap_idx,
+        marker_choices, target_rate=target_rate or 16000,
+    )
+
+    offsets = [0.0] * n
+    confidence = [0.0] * n
+    for local, i in enumerate(av_idx):
+        offsets[i] = av_align.offsets[local]
+        confidence[i] = av_align.confidence[local]
+    for local, i in enumerate(mocap_idx):
+        offsets[i] = mocap_offsets[local]
+        confidence[i] = mocap_conf[local]
+    warnings.extend(av_align.warnings)
+    warnings.extend(mocap_warn)
+    return Alignment(offsets, confidence, warnings)
+
+
 def compute_sync_offsets(
     paths: list[Path],
     *,
     reference_index: int = 0,
     refine: Refine = "parabolic",
     target_rate: int | None = 16000,
+    marker_choices: MarkerChoices | None = None,
     progress: Callable[[float], None] | None = None,
     status: Callable[[str], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> Alignment:
-    """Probe, load audio, and align paths by MFCC cross-correlation.
+    """Probe and align paths (audio/video by MFCC, c3d by clapperboard).
 
     Args:
         paths: Input media file paths.
-        reference_index: Track whose timeline is the origin.
+        reference_index: Track whose timeline is the origin (must be A/V; a
+            mocap reference falls back to the first A/V track).
         refine: Peak refinement.
         target_rate: Decode/resample rate for alignment; None keeps native.
-            See offsets_from_media.
+        marker_choices: Optional c3d clapperboard marker groups (GUI-supplied).
         progress: Optional 0..1 callback.
         status: Optional callback receiving a label for the current stage.
         is_cancelled: Optional cooperative cancel check.
 
     Returns:
-        Alignment (offsets, per-track confidence, warnings); offsets[reference_index] == 0.0.
+        Alignment (offsets, per-track confidence, warnings).
 
     Raises:
-        ValueError: If any input has no audio stream.
+        ValueError: If an audio/video input has no audio stream.
     """
     if is_cancelled is not None and is_cancelled():
         n = len(paths)
@@ -151,8 +231,8 @@ def compute_sync_offsets(
         media.append(probe(p))
     if progress is not None:
         progress(1.0)  # probing done; the load phase reports its own 0..1
-    return offsets_from_media(
+    return align_media(
         media, reference_index=reference_index, refine=refine,
-        target_rate=target_rate, progress=progress, status=status,
-        is_cancelled=is_cancelled,
+        target_rate=target_rate, marker_choices=marker_choices,
+        progress=progress, status=status, is_cancelled=is_cancelled,
     )

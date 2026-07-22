@@ -8,6 +8,8 @@ from typing import Literal
 import av
 from framepipe.metadata import extract_video_metadata
 
+from clapsync.app import mocap
+
 
 @dataclass(frozen=True)
 class MediaInfo:
@@ -16,11 +18,12 @@ class MediaInfo:
     path: Path
     duration: float
     has_audio: bool
-    kind: Literal["audio", "video"]
+    kind: Literal["audio", "video", "mocap"]
     sample_rate: int | None = None
     width: int | None = None
     height: int | None = None
     fps: float | None = None
+    point_rate: float | None = None
 
 
 def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
@@ -47,8 +50,8 @@ def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
 def probe(path: Path) -> MediaInfo:
     """Probe a media file via framepipe (video) and PyAV (audio) metadata.
 
-    A file with a decodable video stream is kind="video"; otherwise it is
-    treated as audio-only.
+    A ``.c3d`` file is kind="mocap"; a file with a decodable video stream is
+    kind="video"; otherwise it is treated as audio-only.
 
     Args:
         path: Source media path.
@@ -63,6 +66,17 @@ def probe(path: Path) -> MediaInfo:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
+
+    if path.suffix.lower() == ".c3d":
+        point_rate, n_frames = mocap.probe_c3d(path)
+        return MediaInfo(
+            path=path,
+            duration=n_frames / point_rate if point_rate else 0.0,
+            has_audio=False,
+            kind="mocap",
+            point_rate=point_rate,
+        )
+
     has_audio, sample_rate, audio_dur = _audio_meta(path)
 
     # extract_video_metadata indexes streams.video[0] unguarded, so audio-only

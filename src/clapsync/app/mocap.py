@@ -61,6 +61,33 @@ class MocapData:
         return self.n_frames / self.point_rate if self.point_rate else 0.0
 
 
+def probe_c3d(path: Path) -> tuple[float, int]:
+    """Read only the c3d header: (point_rate, n_frames). Cheap, no frame data.
+
+    Args:
+        path: Source .c3d path.
+
+    Returns:
+        (point_rate_hz, frame_count).
+
+    Raises:
+        FileNotFoundError: If the path does not exist.
+        ValueError: If the header cannot be parsed.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    try:
+        with open(path, "rb") as handle, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reader = c3d.Reader(handle)
+            return float(reader.point_rate), int(reader.frame_count)
+    except (OSError, FileNotFoundError):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"cannot read c3d header {path}: {exc}") from exc
+
+
 def load_c3d(path: Path) -> MocapData:
     """Read a c3d file into a MocapData.
 

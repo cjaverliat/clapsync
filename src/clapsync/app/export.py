@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Callable, Literal
 
 import av
+import numpy as np
 import torch
 
 from clapsync.app.decode import load_audio
+from clapsync.app.mocap import MocapData, load_c3d, write_c3d
 from clapsync.app.encode import (
     _audio_codec_for,
     _mux_audio_samples,
@@ -22,7 +24,7 @@ from clapsync.app.encode import (
     resolve_audio_output,
 )
 from clapsync.app.media import MediaInfo, probe
-from clapsync.app.sync import offsets_from_media
+from clapsync.app.sync import align_media
 from clapsync.core.offsets import Refine
 from clapsync.core.timerange import TimeRange, common_time_range, full_time_range
 
@@ -322,6 +324,52 @@ def _build_audio_samples(
     return out, rate
 
 
+def _export_mocap_track(
+    info: MediaInfo, offset: float, trim: TimeRange, out_path: Path
+) -> None:
+    """Trim + pad a c3d track to the shared trim range and write it.
+
+    Frames inside the source window are kept; regions outside coverage are
+    padded with invalid frames (residual −1), mirroring the audio silence-pad.
+    Analog data rides along with its point frame, so it stays aligned. The
+    output frame numbering restarts at 1.
+    """
+    data = load_c3d(info.path)
+    rate = data.point_rate
+    local_start, local_end, pad_start, pad_end = clip_window(
+        offset, info.duration, trim,
+    )
+    f0 = max(0, round(local_start * rate))
+    f1 = min(data.n_frames, round(local_end * rate))
+    total = round(trim.duration * rate)
+    pad_front = round(pad_start * rate)
+
+    n_markers = data.n_markers
+    points = np.zeros((total, n_markers, 3), dtype=np.float32)
+    valid = np.zeros((total, n_markers), dtype=bool)  # pad frames invalid
+    analog = np.zeros((total, *data.analog.shape[1:]), dtype=np.float32)
+
+    core = max(0, f1 - f0)
+    end = min(total, pad_front + core)
+    keep = end - pad_front
+    if keep > 0:
+        points[pad_front:end] = data.points[f0 : f0 + keep]
+        valid[pad_front:end] = data.valid[f0 : f0 + keep]
+        analog[pad_front:end] = data.analog[f0 : f0 + keep]
+
+    trimmed = MocapData(
+        point_rate=rate,
+        first_frame=1,
+        labels=data.labels,
+        points=points,
+        valid=valid,
+        analog=analog,
+        analog_rate=data.analog_rate,
+        source_path=info.path,
+    )
+    write_c3d(out_path, trimmed)
+
+
 def export_media(
     media: list[MediaInfo],
     offsets: list[float],
@@ -352,7 +400,10 @@ def export_media(
             logger.info("export: cancelled after %d/%d track(s)", i, n)
             break
         try:
-            if info.kind == "video":
+            if info.kind == "mocap":
+                out_path = settings.output_dir / f"{info.path.stem}_synced.c3d"
+                _export_mocap_track(info, offset, trim, out_path)
+            elif info.kind == "video":
                 out_path = settings.output_dir / f"{info.path.stem}_synced.mp4"
                 _export_video_track(
                     info, offset, trim, settings, out_path, device,
@@ -451,7 +502,7 @@ def sync_and_trim(
         if progress is not None:
             progress(0.5 * f)
 
-    alignment = offsets_from_media(
+    alignment = align_media(
         media,
         reference_index=reference_index,
         refine=refine,
