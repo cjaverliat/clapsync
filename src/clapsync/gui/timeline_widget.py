@@ -558,8 +558,11 @@ class SyncTrimTimelineWidget(TimelineWidget):
     def set_tracks(self, tracks: list[TrackState]) -> None:
         super().set_tracks(tracks)
         total = max((t.end_s for t in tracks), default=10.0)
-        shared_start = max((t.offset_s for t in tracks), default=0.0)
-        shared_end   = min((t.end_s   for t in tracks), default=total)
+        # The default trim covers the audio/video overlap only; a c3d is placed
+        # by its clap link and may move, so it should not shrink the window.
+        av = [t for t in tracks if t.kind != "mocap"] or tracks
+        shared_start = max((t.offset_s for t in av), default=0.0)
+        shared_end   = min((t.end_s   for t in av), default=total)
         if shared_start < shared_end:
             self._trim_start_s = shared_start
             self._trim_end_s   = shared_end

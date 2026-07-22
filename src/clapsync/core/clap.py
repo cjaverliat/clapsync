@@ -34,7 +34,8 @@ _MIN_LOUDNESS_FRAC = 0.15  # peak must reach this fraction of the track's loudes
 
 # --- kinematic detection tuning --------------------------------------------
 _MIN_COLLAPSE_RATIO = 0.5  # gap must shrink to <= this fraction of its span
-_MIN_CLOSING_SHARPNESS = 3.0  # peak closing speed vs. median motion
+_SNAP_REL = 0.15           # a snap's closing speed vs. the strongest snap
+_SNAP_MIN_SEP_S = 0.3      # min separation between distinct snaps
 
 # --- marker naming ---------------------------------------------------------
 _CLAP_KEYWORDS = ("clap", "slate")
@@ -231,10 +232,15 @@ def _hf_ratio(window: np.ndarray, rate: int) -> float:
 # Kinematic detection
 # ---------------------------------------------------------------------------
 
-def detect_clap_motion(
+def detect_clap_motions(
     top_pts: np.ndarray, bottom_pts: np.ndarray, rate: float
-) -> ClapCandidate | None:
-    """Find the clapperboard arms meeting: gap collapse at peak closing speed.
+) -> list[ClapCandidate]:
+    """Find every clapperboard snap: gap collapses at a peak closing speed.
+
+    A real capture can contain more than one clap-like snap (a positioning
+    close, then the real clap; boot/tail padding). Detection cannot tell which
+    is "the clap", so it returns all of them ranked by closing speed and the UI
+    lets the user pick.
 
     Args:
         top_pts: (n_frames, 3) top-arm marker centroid; NaN where occluded.
@@ -242,42 +248,61 @@ def detect_clap_motion(
         rate: Point sampling rate (Hz).
 
     Returns:
-        The clap candidate (time from frame 0), or None if no clear collapse.
+        Snap candidates (time from frame 0), strongest first. Empty if the gap
+        never collapses.
     """
     gap = np.linalg.norm(top_pts - bottom_pts, axis=1)
     finite = np.isfinite(gap)
     if finite.sum() < 3:
-        return None
+        return []
 
     valid_gap = gap[finite]
     span = float(valid_gap.max() - valid_gap.min())
     if span <= 0.0 or valid_gap.min() > _MIN_COLLAPSE_RATIO * valid_gap.max():
-        return None  # gap never collapses -> not a clap
+        return []  # gap never collapses -> not a clap
 
     # Interpolate across dropouts so velocity and the sub-frame refine stay
     # finite even when the markers occlude right at contact.
     filled = _fill_nan(gap)
+    velocity = -np.gradient(filled)  # positive as the gap closes
+    vmax = float(velocity.max())
+    if vmax <= 0.0:
+        return []
 
-    # Closing velocity (positive as the gap shrinks). Occlusion right at impact
-    # can NaN the minimum, so key the event on peak closing speed, which occurs
-    # just before contact and survives a dropout at the very bottom.
-    velocity = -np.gradient(filled)
-    peak = int(np.argmax(velocity))
-    median_speed = np.median(np.abs(velocity)) + 1e-12
-    sharpness = velocity[peak] / median_speed
-    if sharpness < _MIN_CLOSING_SHARPNESS:
-        return None
+    threshold = _SNAP_REL * vmax
+    separation = max(1, int(_SNAP_MIN_SEP_S * rate))
+    peaks: list[int] = []
+    for i in range(1, len(velocity) - 1):
+        if (velocity[i] >= threshold and velocity[i] >= velocity[i - 1]
+                and velocity[i] > velocity[i + 1]):
+            if peaks and i - peaks[-1] <= separation:
+                if velocity[i] > velocity[peaks[-1]]:
+                    peaks[-1] = i
+            else:
+                peaks.append(i)
 
-    # The impact is where closing decelerates to zero after the velocity peak;
-    # fall back to the peak itself if no crossing is found within the tail.
-    impact = peak
-    for f in range(peak, len(velocity) - 1):
-        if velocity[f] <= 0.0:
-            impact = f
-            break
-    time = _parabolic_vertex(-filled, impact) / rate
-    score = float(min(1.0, sharpness / (2 * _MIN_CLOSING_SHARPNESS)))
-    return ClapCandidate(time=time, score=score)
+    candidates: list[ClapCandidate] = []
+    for peak in peaks:
+        # Impact = where closing decelerates to zero after the speed peak; the
+        # gap minimum sits there. Fall back to the peak if no crossing is found.
+        impact = peak
+        for f in range(peak, min(len(velocity) - 1, peak + int(0.4 * rate))):
+            if velocity[f] <= 0.0:
+                impact = f
+                break
+        time = _parabolic_vertex(-filled, impact) / rate
+        candidates.append(ClapCandidate(time=time, score=float(velocity[peak])))
+
+    candidates.sort(key=lambda c: c.score, reverse=True)
+    return candidates
+
+
+def detect_clap_motion(
+    top_pts: np.ndarray, bottom_pts: np.ndarray, rate: float
+) -> ClapCandidate | None:
+    """Strongest clapperboard snap, or None. See detect_clap_motions."""
+    motions = detect_clap_motions(top_pts, bottom_pts, rate)
+    return motions[0] if motions else None
 
 
 def centroid(points: np.ndarray, valid: np.ndarray) -> np.ndarray:

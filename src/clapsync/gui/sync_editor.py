@@ -551,11 +551,17 @@ class SyncEditorWindow(QMainWindow):
         self._recolor_clap_markers(shared_s)
 
     def _refit_trim(self) -> None:
-        """Reset the trim to the common overlap after offsets change."""
-        durations = [info.duration for info in self._video_infos]
-        rng = common_time_range(durations, self._offsets)
+        """Reset the trim to the audio/video overlap after offsets change."""
+        av = [(info.duration, self._offsets[i])
+              for i, info in enumerate(self._video_infos)
+              if info.kind != "mocap"]
+        if not av:
+            return
+        durations = [d for d, _ in av]
+        offsets = [o for _, o in av]
+        rng = common_time_range(durations, offsets)
         if rng.duration <= 0:  # no shared overlap -> fall back to the union
-            rng = full_time_range(durations, self._offsets)
+            rng = full_time_range(durations, offsets)
         self._timeline.set_trim(rng.start, rng.end)
 
     def _recolor_clap_markers(self, anchor_s: float) -> None:

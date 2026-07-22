@@ -513,9 +513,16 @@ def sync_and_trim(
         logger.warning("sync: %s", warning)
     offsets = alignment.offsets
 
-    durations = [m.duration for m in media]
+    # The trim range is taken over audio/video only — a c3d's offset is set by
+    # its clap link and can move, so it should not constrain the default window.
+    # Export still applies the chosen trim to every track (c3d included).
+    av = [(m.duration, o) for m, o in zip(media, offsets) if m.kind != "mocap"]
+    durations, av_offsets = (
+        ([d for d, _ in av], [o for _, o in av]) if av
+        else ([m.duration for m in media], offsets)
+    )
     rng = (common_time_range if trim == "common" else full_time_range)(
-        durations, offsets,
+        durations, av_offsets,
     )
     settings = ExportSettings(trim=rng, output_dir=output_dir)
 
