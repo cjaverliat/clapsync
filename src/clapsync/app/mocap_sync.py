@@ -139,6 +139,54 @@ def motion_clap_time(info: MediaInfo) -> float | None:
     return motion.time if motion is not None else None
 
 
+def sound_clap_times(
+    media: list[MediaInfo], alignment: Alignment, target_rate: int = 16000
+) -> list[float]:
+    """Distinct clap-sound candidate times on the shared timeline.
+
+    One time per agreeing cluster (>=2 tracks; all candidates when there is a
+    single A/V track). These are the sound proposals the clap-link UI offers.
+    Empty unless the project mixes A/V and motion capture.
+    """
+    av_idx = [i for i, m in enumerate(media) if m.kind != "mocap"]
+    mocap_idx = [i for i, m in enumerate(media) if m.kind == "mocap"]
+    if not mocap_idx or not av_idx:
+        return []
+
+    av_media = [media[i] for i in av_idx]
+    av_align = Alignment(
+        [alignment.offsets[i] for i in av_idx],
+        [alignment.confidence[i] for i in av_idx],
+        [],
+    )
+    entries = _sound_candidates(
+        av_media, av_align, target_rate, per_track=_MARKERS_PER_TRACK,
+    )
+    if not entries:
+        return []
+    entries.sort()
+    single = len({k for _t, _s, k in entries}) == 1
+    clusters: list[dict] = []
+    for time, score, track in entries:
+        if clusters and time - clusters[-1]["tmax"] <= _ANCHOR_TOL_S:
+            c = clusters[-1]
+            c["t"].append(time)
+            c["w"].append(score)
+            c["tr"].add(track)
+            c["tmax"] = time
+        else:
+            clusters.append(
+                {"t": [time], "w": [score], "tr": {track}, "tmax": time}
+            )
+    out: list[float] = []
+    for c in clusters:
+        if len(c["tr"]) >= 2 or single:
+            w = np.array(c["w"])
+            t = np.array(c["t"])
+            out.append(float((w * t).sum() / w.sum()))
+    return sorted(out)
+
+
 def clap_markers(
     media: list[MediaInfo], alignment: Alignment, target_rate: int = 16000
 ) -> list[tuple[int, float, bool]]:

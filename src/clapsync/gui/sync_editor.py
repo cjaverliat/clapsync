@@ -30,7 +30,7 @@ from clapsync.app.media import MediaInfo, probe
 from clapsync.app.mocap import load_c3d
 from clapsync.core import TimeRange
 from clapsync.core.timerange import common_time_range, full_time_range
-from clapsync.core.clap import centroid, classify_clap_markers, detect_clap_motion
+from clapsync.core.clap import centroid, classify_clap_markers, detect_clap_motions
 from clapsync.gui import icons
 from clapsync.gui.audio_engine import AudioEngine
 from clapsync.gui.c3d_preview import C3DMarkerPreviewWidget
@@ -64,7 +64,7 @@ class SyncEditorWindow(QMainWindow):
         output_dir: Path | None = None,
         use_proxies: bool = False,
         low_confidence: list[bool] | None = None,
-        clap_markers: list[tuple[int, float, bool]] | None = None,
+        sound_claps: list[float] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -73,7 +73,10 @@ class SyncEditorWindow(QMainWindow):
 
         self._use_proxies: bool = use_proxies
         self._low_confidence: list[bool] = list(low_confidence or [])
-        self._clap_markers: list[tuple[int, float, bool]] = list(clap_markers or [])
+        # Clap-link state (only used when a c3d is present).
+        self._sound_claps: list[float] = list(sound_claps or [])
+        self._movements: dict[int, list[float]] = {}  # c3d track -> local times
+        self._link: dict[int, tuple[int, float]] = {}  # c3d -> (mv idx, sound s)
         self._video_infos: list[MediaInfo] = []
         self._offsets: list[float] = list(offsets)
         self._trim_start: float = 0.0
@@ -115,8 +118,10 @@ class SyncEditorWindow(QMainWindow):
         total = max(info.duration + off for info, off in zip(self._video_infos, self._offsets))
         self._trim_end = total
         self._muted: list[bool] = [False] * len(self._video_infos)
+        self._has_mocap = any(i.kind == "mocap" for i in self._video_infos)
 
         self._build_ui()
+        self._init_clap_links()
         self._wire_signals()
         self._init_timeline()
         self._init_audio()
@@ -161,7 +166,6 @@ class SyncEditorWindow(QMainWindow):
         self._video_slots: list[int] = []
         self._waveforms: dict[int, WaveformWidget] = {}
         self._mocap_previews: dict[int, C3DMarkerPreviewWidget] = {}
-        self._mocap_motion: dict[int, float] = {}  # track index -> clap local s
         for i, info in enumerate(self._video_infos):
             cell = QWidget()
             cell_layout = QVBoxLayout(cell)
@@ -240,6 +244,20 @@ class SyncEditorWindow(QMainWindow):
 
         # ── Bottom bar ────────────────────────────────────────────────────────
         bottom = QHBoxLayout()
+        # Clap-link controls only make sense with a motion-capture track.
+        self._add_sound_btn: QPushButton | None = None
+        self._set_c3d_btn: QPushButton | None = None
+        if self._has_mocap:
+            self._add_sound_btn = QPushButton("Add clap sound (at playhead)")
+            self._set_c3d_btn = QPushButton("Set c3d clap (at playhead)")
+            self._add_sound_btn.setToolTip(
+                "Add a clap-sound point at the playhead, then click it to link"
+            )
+            self._set_c3d_btn.setToolTip(
+                "Mark the c3d frame at the playhead as the clapperboard clap"
+            )
+            bottom.addWidget(self._add_sound_btn)
+            bottom.addWidget(self._set_c3d_btn)
         bottom.addStretch()
         self._export_btn = QPushButton(icons.icon("export"), "Export…")
         self._export_btn.setFixedWidth(100)
@@ -264,13 +282,13 @@ class SyncEditorWindow(QMainWindow):
         if choice is not None:
             preview.set_groups(*choice)
             top, bottom = choice
-            motion = detect_clap_motion(
+            motions = detect_clap_motions(
                 centroid(data.points[:, top], data.valid[:, top]),
                 centroid(data.points[:, bottom], data.valid[:, bottom]),
                 data.point_rate,
             )
-            if motion is not None:
-                self._mocap_motion[index] = motion.time
+            if motions:
+                self._movements[index] = [m.time for m in motions]
         return preview
 
     def _wire_signals(self) -> None:
@@ -279,6 +297,10 @@ class SyncEditorWindow(QMainWindow):
         self._timeline.playhead_changed.connect(self._on_playhead_seek)
         self._timeline.offsets_changed.connect(self._on_offsets_changed)
         self._timeline.clap_selected.connect(self._on_clap_selected)
+        if self._add_sound_btn is not None:
+            self._add_sound_btn.clicked.connect(self._on_add_sound_clap)
+        if self._set_c3d_btn is not None:
+            self._set_c3d_btn.clicked.connect(self._on_set_c3d_clap)
         self._timeline.trim_changed.connect(self._on_trim_changed)
         self._timeline.vscroll_changed.connect(self._track_panel.set_scroll_y)
         self._track_panel.mute_changed.connect(self._on_mute)
@@ -314,7 +336,7 @@ class SyncEditorWindow(QMainWindow):
         ]
         self._timeline.set_tracks(tracks)
         self._track_panel.set_tracks(tracks)
-        self._timeline.set_clap_markers(self._clap_markers)
+        self._rebuild_clap_markers()
         self._trim_start, self._trim_end = self._timeline.get_trim()
         self._update_waveform_windows()
 
@@ -533,22 +555,93 @@ class SyncEditorWindow(QMainWindow):
         self._timeline.set_playhead(clamped)
         self._update_time_label(clamped)
 
-    @Slot(float)
-    def _on_clap_selected(self, shared_s: float) -> None:
-        """Re-anchor every motion-capture track to the clicked clap.
+    def _mocap_indices(self) -> list[int]:
+        return [i for i, inf in enumerate(self._video_infos)
+                if inf.kind == "mocap"]
 
-        Sets each c3d offset so its detected motion clap lands on the selected
-        sound clap (offset = shared - motion_local), then repositions lanes and
-        recolours the markers so the clicked cluster becomes the winner.
-        """
-        if not self._mocap_motion:
+    def _nearest_sound(self, shared_s: float) -> float:
+        """The detected sound clap closest to a shared time (or the time itself)."""
+        if not self._sound_claps:
+            return shared_s
+        return min(self._sound_claps, key=lambda s: abs(s - shared_s))
+
+    def _init_clap_links(self) -> None:
+        """Seed each c3d's clap link from the auto sync (best movement ↔ sound)."""
+        for idx in self._mocap_indices():
+            movements = self._movements.get(idx)
+            if not movements:
+                continue
+            auto_shared = self._offsets[idx] + movements[0]
+            sound = self._nearest_sound(auto_shared)
+            self._link[idx] = (0, sound)
+            self._offsets[idx] = sound - movements[0]
+
+    def _rebuild_clap_markers(self) -> None:
+        """Rebuild the sound + movement markers from the current link state."""
+        if not self._has_mocap:
+            self._timeline.set_clap_markers([])
             return
-        for index, motion_s in self._mocap_motion.items():
-            self._offsets[index] = shared_s - motion_s
+        linked_sounds = {round(s, 6) for _mv, s in self._link.values()}
+        markers: list[tuple[int, float, bool, str]] = []
+        for i, info in enumerate(self._video_infos):
+            if info.kind == "mocap":
+                continue
+            for sound in self._sound_claps:
+                markers.append(
+                    (i, sound, round(sound, 6) in linked_sounds, "sound")
+                )
+        for idx in self._mocap_indices():
+            movements = self._movements.get(idx, [])
+            sel_mv = self._link.get(idx, (0, 0.0))[0]
+            for j, mv in enumerate(movements):
+                shared = self._offsets[idx] + mv
+                markers.append((idx, shared, j == sel_mv, "movement"))
+        self._timeline.set_clap_markers(markers)
+
+    @Slot(int, float, str)
+    def _on_clap_selected(self, track: int, shared_s: float, kind: str) -> None:
+        """Re-link on a clap marker click, then reposition the c3d track(s)."""
+        if not self._has_mocap:
+            return
+        if kind == "sound":
+            for idx in list(self._link):
+                mv_idx = self._link[idx][0]
+                self._link[idx] = (mv_idx, shared_s)
+                self._offsets[idx] = shared_s - self._movements[idx][mv_idx]
+        else:  # movement marker lives on the c3d lane (track == c3d index)
+            movements = self._movements.get(track)
+            if not movements:
+                return
+            j = min(range(len(movements)),
+                    key=lambda k: abs(self._offsets[track] + movements[k] - shared_s))
+            sound = self._link.get(track, (0, shared_s))[1]
+            self._link[track] = (j, sound)
+            self._offsets[track] = sound - movements[j]
+        self._apply_clap_link()
+
+    def _on_add_sound_clap(self) -> None:
+        """Add a custom sound clap at the playhead (a new proposal to link to)."""
+        self._sound_claps.append(self._global_pos)
+        self._sound_claps.sort()
+        self._rebuild_clap_markers()
+
+    def _on_set_c3d_clap(self) -> None:
+        """Mark the c3d frame under the playhead as each c3d's clap movement."""
+        for idx in self._mocap_indices():
+            local = self._global_pos - self._offsets[idx]
+            movements = self._movements.setdefault(idx, [])
+            movements.append(local)
+            sound = self._link.get(idx, (0, self._global_pos))[1]
+            self._link[idx] = (len(movements) - 1, sound)
+            self._offsets[idx] = sound - local
+        self._apply_clap_link()
+
+    def _apply_clap_link(self) -> None:
+        """Push updated c3d offsets to the timeline, trim, previews, markers."""
         self._timeline.set_offsets(self._offsets)
         self._refit_trim()
         self._on_offsets_changed(self._offsets)
-        self._recolor_clap_markers(shared_s)
+        self._rebuild_clap_markers()
 
     def _refit_trim(self) -> None:
         """Reset the trim to the audio/video overlap after offsets change."""
@@ -563,18 +656,6 @@ class SyncEditorWindow(QMainWindow):
         if rng.duration <= 0:  # no shared overlap -> fall back to the union
             rng = full_time_range(durations, offsets)
         self._timeline.set_trim(rng.start, rng.end)
-
-    def _recolor_clap_markers(self, anchor_s: float) -> None:
-        """Mark the selected cluster as winner; move c3d markers to it."""
-        tol = 0.12
-        updated: list[tuple[int, float, bool]] = []
-        for index, shared_s, _win in self._clap_markers:
-            if self._video_infos[index].kind == "mocap":
-                updated.append((index, anchor_s, True))
-            else:
-                updated.append((index, shared_s, abs(shared_s - anchor_s) < tol))
-        self._clap_markers = updated
-        self._timeline.set_clap_markers(updated)
 
     @Slot(float, float)
     def _on_trim_changed(self, trim_start: float, trim_end: float) -> None:

@@ -128,7 +128,7 @@ class TrackState:
 class TimelineWidget(QWidget):
     playhead_changed = Signal(float)  # user seek in global seconds
     vscroll_changed = Signal(int)     # vertical scroll offset in pixels
-    clap_selected = Signal(float)     # user clicked a clap marker (shared s)
+    clap_selected = Signal(int, float, str)  # track, shared s, kind (sound/movement)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -136,8 +136,8 @@ class TimelineWidget(QWidget):
         self.setMinimumHeight(HEADER_H + TRACK_H + TRACK_PAD * 2 + SCROLLBAR_H + 20)
 
         self._tracks: list[TrackState] = []
-        # (track index, shared seconds, is_winner)
-        self._clap_markers: list[tuple[int, float, bool]] = []
+        # (track index, shared seconds, is_selected, kind) kind: sound|movement
+        self._clap_markers: list[tuple[int, float, bool, str]] = []
         self._playhead_s: float = 0.0
         self._zoom: float = 100.0   # px per second
         self._scroll_x: float = _SCROLL_MARGIN  # pixel x of time=0
@@ -253,21 +253,23 @@ class TimelineWidget(QWidget):
 
         painter.end()
 
-    def set_clap_markers(self, markers: list[tuple[int, float, bool]]) -> None:
-        """Mark detected claps: (track index, shared seconds, is_winner).
+    def set_clap_markers(
+        self, markers: list[tuple[int, float, bool, str]]
+    ) -> None:
+        """Set clap markers: (track index, shared seconds, is_selected, kind).
 
-        Winners are the claps that drove the sync; the rest are other detected
-        candidates, drawn dimmer.
+        kind is "sound" or "movement". Selected markers form the active clap
+        link and are drawn bright; the rest are dim proposals/candidates.
         """
         self._clap_markers = list(markers)
         self.update()
 
-    def _clap_at(self, x: float, y: float) -> float | None:
-        """Shared time of the clap marker under (x, y), or None."""
+    def _clap_at(self, x: float, y: float) -> tuple[int, float, str] | None:
+        """The (track, shared, kind) of the clap marker under (x, y), or None."""
         by_index = {track.index: track for track in self._tracks}
-        best: float | None = None
-        best_dx = 5.0
-        for index, shared_s, _win in self._clap_markers:
+        best: tuple[int, float, str] | None = None
+        best_dx = 6.0
+        for index, shared_s, _sel, kind in self._clap_markers:
             track = by_index.get(index)
             if track is None:
                 continue
@@ -276,19 +278,23 @@ class TimelineWidget(QWidget):
                 dx = abs(x - self._s_to_x(shared_s))
                 if dx <= best_dx:
                     best_dx = dx
-                    best = shared_s
+                    best = (index, shared_s, kind)
         return best
 
     def _draw_clap_markers(self, painter: QPainter) -> None:
-        """Draw a flag on each track lane where a clap was detected.
+        """Draw clap markers per lane: sound (amber) and movement (cyan).
 
-        The sync-driving winners are amber; other candidates are dim grey.
-        Winners are drawn last so they sit on top.
+        The selected link members are bright with a solid line; other
+        candidates are dim and dashed. Selected drawn last, on top.
         """
         by_index = {track.index: track for track in self._tracks}
-        winner = QColor("#FFD54F")
-        other = QColor("#888888")
-        for index, shared_s, is_winner in sorted(
+        palette = {
+            ("sound", True): QColor("#FFC107"),
+            ("sound", False): QColor("#7A6A3A"),
+            ("movement", True): QColor("#4FC3F7"),
+            ("movement", False): QColor("#3A5A6A"),
+        }
+        for index, shared_s, selected, kind in sorted(
             self._clap_markers, key=lambda m: m[2]
         ):
             track = by_index.get(index)
@@ -296,15 +302,24 @@ class TimelineWidget(QWidget):
                 continue
             rect = self._track_rect(track)
             x = self._s_to_x(shared_s)
-            color = winner if is_winner else other
-            painter.setPen(QPen(color, 1, Qt.PenStyle.DashLine))
+            color = palette[(kind, selected)]
+            style = Qt.PenStyle.SolidLine if selected else Qt.PenStyle.DashLine
+            painter.setPen(QPen(color, 2 if selected else 1, style))
             painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
-            size = 8 if is_winner else 6
-            flag = QPolygonF([
-                QPointF(x, rect.top()),
-                QPointF(x + size, rect.top()),
-                QPointF(x, rect.top() + size),
-            ])
+            size = 8 if selected else 6
+            # Sound flags point down from the top; movement flags point up.
+            if kind == "movement":
+                flag = QPolygonF([
+                    QPointF(x, rect.bottom()),
+                    QPointF(x + size, rect.bottom()),
+                    QPointF(x, rect.bottom() - size),
+                ])
+            else:
+                flag = QPolygonF([
+                    QPointF(x, rect.top()),
+                    QPointF(x + size, rect.top()),
+                    QPointF(x, rect.top() + size),
+                ])
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(color))
             painter.drawPolygon(flag)
@@ -632,7 +647,7 @@ class SyncTrimTimelineWidget(TimelineWidget):
 
         clap = self._clap_at(x, y)
         if clap is not None:
-            self.clap_selected.emit(clap)
+            self.clap_selected.emit(clap[0], clap[1], clap[2])
             return
 
         if abs(x - self._s_to_x(self._trim_start_s)) <= HANDLE_W:

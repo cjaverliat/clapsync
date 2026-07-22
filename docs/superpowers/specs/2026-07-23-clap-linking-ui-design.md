@@ -58,6 +58,20 @@ custom points. Setting a link freezes the offset until changed.
 - Auto link = best sound cluster paired with the highest-velocity movement snap.
   It is only a default.
 
+### Auto-proposal quality (planned refinement)
+
+Reject geometrically-invalid clapperboard motion so the auto proposal is not
+fooled by tracking garbage:
+- The bottom-arm markers should be **coplanar** (they sit on a flat arm). If
+  they do not form a plane at a candidate frame, the tracking is bad — drop it.
+- The top-arm markers should be **parallel/coplanar** to the bottom-arm plane
+  (both arms are flat). If not, drop it.
+- **Debounce**: if most of the last N seconds around a candidate were unreliable
+  (bad plane / large residuals), discard the candidate.
+This needs the raw per-marker positions (not just centroids) and runs as a
+filter/weight over `detect_clap_motions`. It is a proposal-quality improvement;
+the manual clap link remains the guarantee.
+
 ## Trim change
 
 - The default (common) trim range is computed over **audio/video tracks only** —

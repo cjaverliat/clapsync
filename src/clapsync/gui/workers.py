@@ -47,20 +47,20 @@ class OffsetWorker(QObject):
                 progress=lambda f: self.progress_value.emit(int(f * 1000)),
                 status=lambda s: self.status.emit(s),
             )
-            self.finished.emit((alignment, self._clap_markers(alignment)))
+            self.finished.emit((alignment, self._sound_claps(alignment)))
         except Exception as exc:  # noqa: BLE001
             logger.exception("offset worker failed")
             self.failed.emit(str(exc))
 
-    def _clap_markers(self, alignment) -> list:
-        """Detect clap markers for the timeline; never fatal to the sync."""
+    def _sound_claps(self, alignment) -> list:
+        """Detect sound-clap candidates for the link UI; never fatal to sync."""
         try:
             from clapsync.app.media import probe
-            from clapsync.app.mocap_sync import clap_markers
+            from clapsync.app.mocap_sync import sound_clap_times
             media = [probe(p) for p in self._paths]
-            return clap_markers(media, alignment)
+            return sound_clap_times(media, alignment)
         except Exception:  # noqa: BLE001
-            logger.exception("clap marker detection failed")
+            logger.exception("sound clap detection failed")
             return []
 
 

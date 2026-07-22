@@ -154,7 +154,7 @@ def main() -> None:
     )
     if result is None:
         sys.exit(0)
-    alignment, clap_markers = result
+    alignment, sound_claps = result
     offsets = alignment.offsets
 
     if alignment.warnings:
@@ -182,7 +182,7 @@ def main() -> None:
     low = [c < LOW_CONFIDENCE for c in alignment.confidence]
     window = SyncEditorWindow(
         video_paths=video_paths, offsets=offsets, use_proxies=use_proxies,
-        low_confidence=low, clap_markers=clap_markers,
+        low_confidence=low, sound_claps=sound_claps,
     )
     window.showMaximized()
     sys.exit(app.exec())
