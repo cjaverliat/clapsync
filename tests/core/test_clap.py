@@ -5,8 +5,10 @@ import numpy as np
 
 from clapsync.core.clap import (
     centroid,
+    clapperboard_reliability,
     classify_clap_markers,
     detect_clap_motion,
+    detect_clap_motions,
     detect_clap_sound,
 )
 
@@ -119,6 +121,36 @@ def test_detect_clap_motion_survives_occlusion_at_impact():
     cand = detect_clap_motion(top, bottom, rate)
     assert cand is not None
     assert abs(cand.time - 100 / rate) < 0.1
+
+
+def test_clapperboard_reliability_accepts_valid_rejects_garbage():
+    # Valid: bottom coplanar (z=0 plane), top colinear (a line at z=10).
+    bottom = np.array([[[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]]], float)
+    top = np.array([[[0, 0, 10], [1, 0, 10], [2, 0, 10], [3, 0, 10]]], float)
+    valid = np.ones((1, 4), dtype=bool)
+    assert clapperboard_reliability(top, valid, bottom, valid)[0]
+
+    rng = np.random.default_rng(0)
+    garbage_b = rng.standard_normal((1, 4, 3)) * 100
+    garbage_t = rng.standard_normal((1, 4, 3)) * 100
+    assert not clapperboard_reliability(garbage_t, valid, garbage_b, valid)[0]
+
+
+def test_clapperboard_reliability_marks_occluded_frames_unreliable():
+    bottom = np.zeros((1, 4, 3))
+    top = np.zeros((1, 4, 3))
+    valid = np.ones((1, 4), dtype=bool)
+    valid[0, 0] = False  # one occluded marker
+    assert not clapperboard_reliability(top, valid, bottom, valid)[0]
+
+
+def test_detect_motions_drops_snap_in_unreliable_region():
+    rate = 100.0
+    top, bottom = _snap_gap(200, snap_start=90, snap_end=100, size=20.0)
+    assert detect_clap_motions(top, bottom, rate)  # found without a mask
+    unreliable = np.ones(200, dtype=bool)
+    unreliable[80:120] = False  # the snap sits in a bad-geometry stretch
+    assert detect_clap_motions(top, bottom, rate, unreliable) == []
 
 
 def test_detect_clap_motion_none_without_collapse():

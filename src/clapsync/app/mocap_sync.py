@@ -194,7 +194,11 @@ def _offset_for_track(
     top_idx, bottom_idx = choice
     top = clap.centroid(data.points[:, top_idx], data.valid[:, top_idx])
     bottom = clap.centroid(data.points[:, bottom_idx], data.valid[:, bottom_idx])
-    motion = clap.detect_clap_motion(top, bottom, data.point_rate)
+    reliable = clap.clapperboard_reliability(
+        data.points[:, top_idx], data.valid[:, top_idx],
+        data.points[:, bottom_idx], data.valid[:, bottom_idx],
+    )
+    motion = clap.detect_clap_motion(top, bottom, data.point_rate, reliable)
     if motion is None:
         return 0.0, (
             f"{name}: no clapperboard motion detected — motion capture left "

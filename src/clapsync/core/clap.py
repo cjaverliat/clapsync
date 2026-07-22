@@ -36,6 +36,12 @@ _MIN_LOUDNESS_FRAC = 0.15  # peak must reach this fraction of the track's loudes
 _MIN_COLLAPSE_RATIO = 0.5  # gap must shrink to <= this fraction of its span
 _SNAP_REL = 0.15           # a snap's closing speed vs. the strongest snap
 _SNAP_MIN_SEP_S = 0.3      # min separation between distinct snaps
+# Geometry reliability: a clapperboard's bottom arm is a plane and its top arm
+# is a line. Bad tracking scatters the markers; reject those frames.
+_PLANE_TOL = 0.05          # bottom coplanarity: 3rd/1st singular value below this
+_LINE_TOL = 0.15           # top colinearity: 2nd/1st singular value below this
+_RELIABLE_WINDOW_S = 0.5   # debounce window before a snap
+_RELIABLE_FRAC = 0.6       # min reliable fraction in that window
 
 # --- marker naming ---------------------------------------------------------
 _CLAP_KEYWORDS = ("clap", "slate")
@@ -232,8 +238,42 @@ def _hf_ratio(window: np.ndarray, rate: int) -> float:
 # Kinematic detection
 # ---------------------------------------------------------------------------
 
+def clapperboard_reliability(
+    top_pts: np.ndarray, top_valid: np.ndarray,
+    bottom_pts: np.ndarray, bottom_valid: np.ndarray,
+) -> np.ndarray:
+    """Per-frame mask: True where the clapperboard geometry looks valid.
+
+    A real clapperboard's bottom arm is planar and its top arm is (nearly)
+    colinear. Bad tracking scatters the markers, breaking both. A frame with any
+    occluded arm marker is treated as unreliable (missing data).
+
+    Args:
+        top_pts: (n_frames, n_top, 3) top-arm marker positions.
+        top_valid: (n_frames, n_top) bool.
+        bottom_pts: (n_frames, n_bottom, 3) bottom-arm marker positions.
+        bottom_valid: (n_frames, n_bottom) bool.
+
+    Returns:
+        (n_frames,) bool reliability mask.
+    """
+    n = top_pts.shape[0]
+    reliable = top_valid.all(axis=1) & bottom_valid.all(axis=1)
+
+    if bottom_pts.shape[1] >= 3:
+        centred = bottom_pts - bottom_pts.mean(axis=1, keepdims=True)
+        sv = np.linalg.svd(centred, compute_uv=False)  # (n, 3)
+        reliable &= sv[:, 2] <= _PLANE_TOL * (sv[:, 0] + 1e-9)
+    if top_pts.shape[1] >= 3:
+        centred = top_pts - top_pts.mean(axis=1, keepdims=True)
+        sv = np.linalg.svd(centred, compute_uv=False)
+        reliable &= sv[:, 1] <= _LINE_TOL * (sv[:, 0] + 1e-9)
+    return reliable
+
+
 def detect_clap_motions(
-    top_pts: np.ndarray, bottom_pts: np.ndarray, rate: float
+    top_pts: np.ndarray, bottom_pts: np.ndarray, rate: float,
+    reliable: np.ndarray | None = None,
 ) -> list[ClapCandidate]:
     """Find every clapperboard snap: gap collapses at a peak closing speed.
 
@@ -246,6 +286,9 @@ def detect_clap_motions(
         top_pts: (n_frames, 3) top-arm marker centroid; NaN where occluded.
         bottom_pts: (n_frames, 3) bottom-arm marker centroid; NaN where occluded.
         rate: Point sampling rate (Hz).
+        reliable: Optional (n_frames,) geometry-reliability mask (see
+            clapperboard_reliability). Snaps at unreliable frames, or preceded by
+            mostly-unreliable frames, are dropped.
 
     Returns:
         Snap candidates (time from frame 0), strongest first. Empty if the gap
@@ -281,6 +324,14 @@ def detect_clap_motions(
             else:
                 peaks.append(i)
 
+    if reliable is not None:
+        window = max(1, int(_RELIABLE_WINDOW_S * rate))
+        peaks = [
+            p for p in peaks
+            if reliable[p]
+            and reliable[max(0, p - window):p + 1].mean() >= _RELIABLE_FRAC
+        ]
+
     candidates: list[ClapCandidate] = []
     for peak in peaks:
         # Impact = where closing decelerates to zero after the speed peak; the
@@ -298,10 +349,11 @@ def detect_clap_motions(
 
 
 def detect_clap_motion(
-    top_pts: np.ndarray, bottom_pts: np.ndarray, rate: float
+    top_pts: np.ndarray, bottom_pts: np.ndarray, rate: float,
+    reliable: np.ndarray | None = None,
 ) -> ClapCandidate | None:
     """Strongest clapperboard snap, or None. See detect_clap_motions."""
-    motions = detect_clap_motions(top_pts, bottom_pts, rate)
+    motions = detect_clap_motions(top_pts, bottom_pts, rate, reliable)
     return motions[0] if motions else None
 
 

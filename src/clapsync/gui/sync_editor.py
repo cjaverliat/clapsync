@@ -30,7 +30,12 @@ from clapsync.app.media import MediaInfo, probe
 from clapsync.app.mocap import load_c3d
 from clapsync.core import TimeRange
 from clapsync.core.timerange import common_time_range, full_time_range
-from clapsync.core.clap import centroid, classify_clap_markers, detect_clap_motions
+from clapsync.core.clap import (
+    centroid,
+    clapperboard_reliability,
+    classify_clap_markers,
+    detect_clap_motions,
+)
 from clapsync.gui import icons
 from clapsync.gui.audio_engine import AudioEngine
 from clapsync.gui.c3d_preview import C3DMarkerPreviewWidget
@@ -329,10 +334,14 @@ class SyncEditorWindow(QMainWindow):
         if choice is not None:
             preview.set_groups(*choice)
             top, bottom = choice
+            reliable = clapperboard_reliability(
+                data.points[:, top], data.valid[:, top],
+                data.points[:, bottom], data.valid[:, bottom],
+            )
             motions = detect_clap_motions(
                 centroid(data.points[:, top], data.valid[:, top]),
                 centroid(data.points[:, bottom], data.valid[:, bottom]),
-                data.point_rate,
+                data.point_rate, reliable,
             )
             if motions:
                 self._auto_move[index] = motions[0].time  # best snap
