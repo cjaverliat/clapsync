@@ -27,9 +27,12 @@ from PySide6.QtWidgets import (
 from clapsync.app import ExportResult, ExportSettings
 from clapsync.app.decode import load_audio
 from clapsync.app.media import MediaInfo, probe
+from clapsync.app.mocap import load_c3d
 from clapsync.core import TimeRange
+from clapsync.core.clap import classify_clap_markers
 from clapsync.gui import icons
 from clapsync.gui.audio_engine import AudioEngine
+from clapsync.gui.c3d_preview import C3DMarkerPreviewWidget
 from clapsync.gui.export_dialog import ExportDialog, fmt_time
 from clapsync.gui.video_player import VideoPlayerWidget, VideoGroupWorker
 from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
@@ -97,7 +100,8 @@ class SyncEditorWindow(QMainWindow):
                 )
             else:
                 logger.debug(
-                    "probe done: %s  duration=%.2fs  audio", path.name, info.duration,
+                    "probe done: %s  duration=%.2fs  %s",
+                    path.name, info.duration, info.kind,
                 )
             self._video_infos.append(info)
 
@@ -153,6 +157,7 @@ class SyncEditorWindow(QMainWindow):
         self._players: list[VideoPlayerWidget] = []
         self._video_slots: list[int] = []
         self._waveforms: dict[int, WaveformWidget] = {}
+        self._mocap_previews: dict[int, C3DMarkerPreviewWidget] = {}
         for i, info in enumerate(self._video_infos):
             cell = QWidget()
             cell_layout = QVBoxLayout(cell)
@@ -171,6 +176,10 @@ class SyncEditorWindow(QMainWindow):
                 cell_layout.addWidget(player, stretch=1)
                 self._players.append(player)
                 self._video_slots.append(i)
+            elif info.kind == "mocap":
+                preview = self._build_mocap_preview(info)
+                cell_layout.addWidget(preview, stretch=1)
+                self._mocap_previews[i] = preview
             else:
                 wf = WaveformWidget()
                 cell_layout.addWidget(wf, stretch=1)
@@ -233,6 +242,19 @@ class SyncEditorWindow(QMainWindow):
         bottom.addWidget(self._export_btn)
         root.addLayout(bottom)
 
+    def _build_mocap_preview(self, info: MediaInfo) -> C3DMarkerPreviewWidget:
+        """Load a c3d and build its animated marker preview cell."""
+        data = load_c3d(info.path)
+        preview = C3DMarkerPreviewWidget(data.points, data.valid)
+        preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        preview.setMinimumSize(160, 90)
+        choice = classify_clap_markers(data.labels)
+        if choice is not None:
+            preview.set_groups(*choice)
+        return preview
+
     def _wire_signals(self) -> None:
         self._play_btn.clicked.connect(self._on_play_pause)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self).activated.connect(self._on_play_pause)
@@ -287,6 +309,9 @@ class SyncEditorWindow(QMainWindow):
         self._audio = AudioEngine(self)
         waveforms = []
         for info in self._video_infos:
+            if info.kind == "mocap":
+                waveforms.append(torch.zeros(1, 1))  # motion capture is silent
+                continue
             try:
                 w, _rate = load_audio(info.path, target_rate=48000)
             except Exception as exc:
@@ -523,6 +548,9 @@ class SyncEditorWindow(QMainWindow):
         self._update_time_label(global_s)
         for wf in self._waveforms.values():
             wf.set_playhead(global_s)
+        for idx, preview in self._mocap_previews.items():
+            rate = self._video_infos[idx].point_rate or 0.0
+            preview.set_frame(round((global_s - self._offsets[idx]) * rate))
         if self._is_playing and global_s >= self._trim_end - 0.05:
             if self._loop_checkbox.isChecked():
                 self._restart_from_trim_start()

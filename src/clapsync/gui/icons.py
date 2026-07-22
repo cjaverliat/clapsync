@@ -27,6 +27,7 @@ _MDI = {
     "unmute": "mdi6.volume-high",
     "audio": "mdi6.music-note",
     "video": "mdi6.filmstrip",
+    "mocap": "mdi6.motion",
     "warning": "mdi6.alert",
 }
 

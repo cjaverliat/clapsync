@@ -72,6 +72,39 @@ def _prompt_use_proxies() -> bool:
     return box.exec() == QMessageBox.StandardButton.Yes
 
 
+def _resolve_marker_choices(video_paths: list) -> dict:
+    """Resolve clapperboard markers for c3d inputs before offset computation.
+
+    Runs on the main thread so the sync worker never has to raise a dialog.
+    Files whose markers auto-classify by name are skipped; ambiguous ones
+    prompt a MarkerSelectionDialog. Cancelling leaves a file unresolved — the
+    bridge then leaves it at offset 0 with a warning.
+
+    Returns:
+        {input_index: (top_indices, bottom_indices)} for manually picked files.
+    """
+    from clapsync.app.mocap import load_c3d
+    from clapsync.core.clap import classify_clap_markers
+    from clapsync.gui.marker_selection_dialog import MarkerSelectionDialog
+
+    choices: dict = {}
+    for idx, path in enumerate(video_paths):
+        if path.suffix.lower() != ".c3d":
+            continue
+        try:
+            data = load_c3d(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not read %s for marker selection: %s",
+                           path.name, exc)
+            continue
+        if classify_clap_markers(data.labels) is not None:
+            continue
+        dialog = MarkerSelectionDialog(path.name, data.labels)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            choices[idx] = dialog.get_selection()
+    return choices
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="clapsync — multi-camera audio sync tool")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
@@ -115,7 +148,10 @@ def main() -> None:
         prepare_proxies_with_progress,
     )
 
-    alignment = compute_offsets_with_progress(video_paths)
+    marker_choices = _resolve_marker_choices(video_paths)
+    alignment = compute_offsets_with_progress(
+        video_paths, marker_choices=marker_choices
+    )
     if alignment is None:
         sys.exit(0)
     offsets = alignment.offsets

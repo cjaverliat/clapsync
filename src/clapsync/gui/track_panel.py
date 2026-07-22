@@ -91,9 +91,8 @@ class TrackHeaderPanel(QWidget):
 
             # Kind icon.
             cy = rect.center().y()
-            kind_px = self._px(
-                "audio" if track.kind == "audio" else "video", 14, text_hex
-            )
+            kind_name = track.kind if track.kind in ("audio", "mocap") else "video"
+            kind_px = self._px(kind_name, 14, text_hex)
             painter.drawPixmap(QPointF(rect.left() + 15, cy - 7), kind_px)
 
             # Name (elided), leaving room for the kind icon, an optional warning
