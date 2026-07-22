@@ -215,9 +215,19 @@ class SyncEditorWindow(QMainWindow):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(6)
 
+        self._prev_frame_btn = QPushButton("◀")
+        self._prev_frame_btn.setFixedWidth(32)
+        self._prev_frame_btn.setToolTip("Previous frame (←)")
+        controls.addWidget(self._prev_frame_btn)
+
         self._play_btn = QPushButton(icons.icon("play"), "  Play")
         self._play_btn.setFixedWidth(90)
         controls.addWidget(self._play_btn)
+
+        self._next_frame_btn = QPushButton("▶")
+        self._next_frame_btn.setFixedWidth(32)
+        self._next_frame_btn.setToolTip("Next frame (→)")
+        controls.addWidget(self._next_frame_btn)
 
         self._time_label = QLabel("0:00.000 / 0:00.000")
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -294,6 +304,14 @@ class SyncEditorWindow(QMainWindow):
     def _wire_signals(self) -> None:
         self._play_btn.clicked.connect(self._on_play_pause)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self).activated.connect(self._on_play_pause)
+        self._prev_frame_btn.clicked.connect(lambda: self._step_frame(-1))
+        self._next_frame_btn.clicked.connect(lambda: self._step_frame(1))
+        QShortcut(QKeySequence(Qt.Key.Key_Left), self).activated.connect(
+            lambda: self._step_frame(-1)
+        )
+        QShortcut(QKeySequence(Qt.Key.Key_Right), self).activated.connect(
+            lambda: self._step_frame(1)
+        )
         self._timeline.playhead_changed.connect(self._on_playhead_seek)
         self._timeline.offsets_changed.connect(self._on_offsets_changed)
         if self._set_c3d_btn is not None:
@@ -541,6 +559,18 @@ class SyncEditorWindow(QMainWindow):
             return
         logger.debug("SyncEditorWindow: seek_all  global_ts=%.4fs", global_s)
         self._group_worker.cmd("seek", global_s, self._seek_gen)
+
+    def _frame_step(self) -> float:
+        """Seconds per frame at the finest rate present (video fps / c3d rate)."""
+        rates = [i.fps for i in self._video_infos if i.fps]
+        rates += [i.point_rate for i in self._video_infos if i.point_rate]
+        return 1.0 / max(rates) if rates else 1.0 / 30.0
+
+    def _step_frame(self, direction: int) -> None:
+        """Nudge the playhead one frame; pauses playback for precise control."""
+        if self._is_playing:
+            self._stop_playback()
+        self._on_playhead_seek(self._global_pos + direction * self._frame_step())
 
     @Slot(float)
     def _on_playhead_seek(self, global_s: float) -> None:
