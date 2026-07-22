@@ -128,6 +128,7 @@ class TrackState:
 class TimelineWidget(QWidget):
     playhead_changed = Signal(float)  # user seek in global seconds
     vscroll_changed = Signal(int)     # vertical scroll offset in pixels
+    clap_selected = Signal(float)     # user clicked a clap marker (shared s)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -260,6 +261,23 @@ class TimelineWidget(QWidget):
         """
         self._clap_markers = list(markers)
         self.update()
+
+    def _clap_at(self, x: float, y: float) -> float | None:
+        """Shared time of the clap marker under (x, y), or None."""
+        by_index = {track.index: track for track in self._tracks}
+        best: float | None = None
+        best_dx = 5.0
+        for index, shared_s, _win in self._clap_markers:
+            track = by_index.get(index)
+            if track is None:
+                continue
+            rect = self._track_rect(track)
+            if rect.top() <= y <= rect.bottom():
+                dx = abs(x - self._s_to_x(shared_s))
+                if dx <= best_dx:
+                    best_dx = dx
+                    best = shared_s
+        return best
 
     def _draw_clap_markers(self, painter: QPainter) -> None:
         """Draw a flag on each track lane where a clap was detected.
@@ -589,11 +607,24 @@ class SyncTrimTimelineWidget(TimelineWidget):
 
     # ---------------------------------------------------------- mouse events
 
+    def set_offsets(self, offsets: list[float]) -> None:
+        """Reposition track lanes to new offsets (e.g. after re-anchoring)."""
+        for track in self._tracks:
+            if track.index < len(offsets):
+                track.offset_s = offsets[track.index]
+        self.update()
+
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
 
         x = float(event.position().x())
+        y = float(event.position().y())
+
+        clap = self._clap_at(x, y)
+        if clap is not None:
+            self.clap_selected.emit(clap)
+            return
 
         if abs(x - self._s_to_x(self._trim_start_s)) <= HANDLE_W:
             self._drag_mode = "trim_start"
