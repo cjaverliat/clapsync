@@ -63,6 +63,7 @@ class SyncEditorWindow(QMainWindow):
         output_dir: Path | None = None,
         use_proxies: bool = False,
         low_confidence: list[bool] | None = None,
+        clap_markers: list[tuple[int, float, bool]] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -71,6 +72,7 @@ class SyncEditorWindow(QMainWindow):
 
         self._use_proxies: bool = use_proxies
         self._low_confidence: list[bool] = list(low_confidence or [])
+        self._clap_markers: list[tuple[int, float, bool]] = list(clap_markers or [])
         self._video_infos: list[MediaInfo] = []
         self._offsets: list[float] = list(offsets)
         self._trim_start: float = 0.0
@@ -295,6 +297,7 @@ class SyncEditorWindow(QMainWindow):
         ]
         self._timeline.set_tracks(tracks)
         self._track_panel.set_tracks(tracks)
+        self._timeline.set_clap_markers(self._clap_markers)
         self._trim_start, self._trim_end = self._timeline.get_trim()
         self._update_waveform_windows()
 

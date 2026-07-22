@@ -30,7 +30,7 @@ def _fmt_eta(seconds: float) -> str:
 class OffsetWorker(QObject):
     progress_value = Signal(int)  # 0..1000
     status = Signal(str)  # human-readable current stage
-    finished = Signal(object)  # Alignment
+    finished = Signal(object)  # (Alignment, clap_markers)
     failed = Signal(str)
 
     def __init__(self, paths: list[Path], marker_choices=None) -> None:
@@ -47,10 +47,21 @@ class OffsetWorker(QObject):
                 progress=lambda f: self.progress_value.emit(int(f * 1000)),
                 status=lambda s: self.status.emit(s),
             )
-            self.finished.emit(alignment)
+            self.finished.emit((alignment, self._clap_markers(alignment)))
         except Exception as exc:  # noqa: BLE001
             logger.exception("offset worker failed")
             self.failed.emit(str(exc))
+
+    def _clap_markers(self, alignment) -> list:
+        """Detect clap markers for the timeline; never fatal to the sync."""
+        try:
+            from clapsync.app.media import probe
+            from clapsync.app.mocap_sync import clap_markers
+            media = [probe(p) for p in self._paths]
+            return clap_markers(media, alignment)
+        except Exception:  # noqa: BLE001
+            logger.exception("clap marker detection failed")
+            return []
 
 
 class ProxyWorker(QObject):

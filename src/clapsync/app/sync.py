@@ -156,12 +156,28 @@ def align_media(
         )
 
     warnings: list[str] = []
-    if reference_index >= n or media[reference_index].kind == "mocap":
-        reference_index = av_idx[0]
-        warnings.append(
-            "reference is motion capture; using the first audio/video track"
-        )
+    # The reference anchors MFCC sync, so it must carry audio — never a c3d, and
+    # never a silent video. Fall back to the first audio-bearing track.
+    valid_ref = (
+        0 <= reference_index < n
+        and media[reference_index].kind != "mocap"
+        and media[reference_index].has_audio
+    )
+    if not valid_ref:
+        audio_refs = [i for i in av_idx if media[i].has_audio]
+        if audio_refs:
+            reference_index = audio_refs[0]
+            warnings.append(
+                "sync reference must have audio; using the first "
+                "audio-bearing track"
+            )
+        else:
+            reference_index = av_idx[0]  # no audio anywhere; will error below
 
+    logger.info(
+        "sync reference: %s (%s)",
+        media[reference_index].path.name, media[reference_index].kind,
+    )
     av_media = [media[i] for i in av_idx]
     av_align = offsets_from_media(
         av_media, reference_index=av_idx.index(reference_index), refine=refine,

@@ -16,6 +16,7 @@ import pytest
 from clapsync.app.export import ExportSettings, export_media
 from clapsync.app.media import probe
 from clapsync.app.mocap import load_c3d
+from clapsync.app.mocap_sync import clap_markers
 from clapsync.app.sync import align_media
 from clapsync.core.timerange import full_time_range
 
@@ -92,6 +93,27 @@ def test_c3d_syncs_to_audio_clap_and_exports(tmp_path: Path):
     data = load_c3d(exported)
     assert data.n_frames == round(trim.duration * POINT_RATE)
     assert data.labels[:2] == ["clapperboard_top", "clapperboard_down"]
+
+
+@pytest.mark.slow
+def test_reference_never_c3d_and_markers_flag_winner(tmp_path: Path):
+    wav = tmp_path / "cam.wav"
+    c3d_path = tmp_path / "clap.c3d"
+    _write_clap_wav(wav)
+    _write_clap_c3d(c3d_path)
+
+    # c3d first in the list must not become the sync reference.
+    media = [probe(c3d_path), probe(wav)]
+    alignment = align_media(media, reference_index=0, target_rate=16000)
+    assert any("reference must have audio" in w for w in alignment.warnings)
+    assert abs(alignment.offsets[0] - (AUDIO_CLAP_S - MOTION_CLAP_S)) < 0.05
+
+    markers = clap_markers(media, alignment)
+    winners = [m for m in markers if m[2]]
+    assert winners, "expected a winning clap marker"
+    # Winner clap sits at the shared anchor for both the audio and the c3d.
+    for _idx, shared, _win in winners:
+        assert abs(shared - AUDIO_CLAP_S) < 0.05
 
 
 @pytest.mark.slow

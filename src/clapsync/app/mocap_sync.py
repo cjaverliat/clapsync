@@ -39,17 +39,34 @@ _SYNCED_CONFIDENCE = 2.0 * LOW_CONFIDENCE
 MarkerChoices = dict[int, tuple[list[int], list[int]]]
 
 
+# How many clap candidates to keep per track when surfacing timeline markers.
+_MARKERS_PER_TRACK = 4
+
+
 def detect_sound_anchor(
     av_media: list[MediaInfo], av_align: Alignment, target_rate: int = 16000
 ) -> float | None:
     """Find the clap time on the shared timeline from the A/V audio.
 
-    Detects clap candidates in each confidently-synced A/V track, lifts them to
-    shared time, and keeps the time cluster that several mics agree on (or the
-    single track's best candidate when only one A/V track exists).
-
     Returns:
         Shared-timeline clap time in seconds, or None if no reliable anchor.
+    """
+    entries = _sound_candidates(av_media, av_align, target_rate, per_track=3)
+    if not entries:
+        return None
+    usable = {k for _t, _s, k in entries}
+    anchor, _winners = _best_cluster(entries, single_ok=len(usable) == 1)
+    return anchor
+
+
+def _sound_candidates(
+    av_media: list[MediaInfo], av_align: Alignment, target_rate: int,
+    per_track: int,
+) -> list[tuple[float, float, int]]:
+    """Detect clap candidates in confidently-synced A/V tracks.
+
+    Returns:
+        (shared_time, score, av_track_index) for each candidate.
     """
     usable = [
         k for k, m in enumerate(av_media)
@@ -57,49 +74,79 @@ def detect_sound_anchor(
     ]
     if not usable:  # e.g. a single reference track, or all low-confidence
         usable = [k for k, m in enumerate(av_media) if m.has_audio]
-    if not usable:
-        return None
 
-    entries: list[tuple[float, float, int]] = []  # (shared_time, score, track)
+    entries: list[tuple[float, float, int]] = []
     for k in usable:
         wave, rate = load_audio(av_media[k].path, target_rate=target_rate)
         samples = wave.reshape(-1).cpu().numpy()
-        for cand in clap.detect_clap_sound(samples, rate)[:3]:
+        for cand in clap.detect_clap_sound(samples, rate)[:per_track]:
             entries.append((cand.time + av_align.offsets[k], cand.score, k))
-
-    if not entries:
-        return None
-    return _best_cluster(entries, single_ok=len(usable) == 1)
+    return entries
 
 
 def _best_cluster(
     entries: list[tuple[float, float, int]], single_ok: bool
-) -> float | None:
-    """Score-weighted time of the cluster the most mics agree on."""
+) -> tuple[float | None, set[tuple[float, int]]]:
+    """Anchor time and the winning cluster's (shared_time, track) members."""
     entries.sort()
     clusters: list[dict] = []
     for time, score, track in entries:
         if clusters and time - clusters[-1]["tmax"] <= _ANCHOR_TOL_S:
             c = clusters[-1]
-            c["times"].append(time)
+            c["members"].append((time, track))
             c["scores"].append(score)
             c["tracks"].add(track)
             c["tmax"] = time
         else:
             clusters.append(
-                {"times": [time], "scores": [score], "tracks": {track},
-                 "tmax": time}
+                {"members": [(time, track)], "scores": [score],
+                 "tracks": {track}, "tmax": time}
             )
 
-    accepted = [
-        c for c in clusters if len(c["tracks"]) >= 2 or single_ok
-    ]
+    accepted = [c for c in clusters if len(c["tracks"]) >= 2 or single_ok]
     if not accepted:
-        return None
+        return None, set()
     best = max(accepted, key=lambda c: (len(c["tracks"]), sum(c["scores"])))
     weights = np.array(best["scores"])
-    times = np.array(best["times"])
-    return float((weights * times).sum() / weights.sum())
+    times = np.array([t for t, _track in best["members"]])
+    anchor = float((weights * times).sum() / weights.sum())
+    return anchor, set(best["members"])
+
+
+def clap_markers(
+    media: list[MediaInfo], alignment: Alignment, target_rate: int = 16000
+) -> list[tuple[int, float, bool]]:
+    """Detected clap positions for the timeline.
+
+    Surfaces every clap-sound candidate found in the A/V tracks, plus each
+    synced c3d's motion clap, as (track_index, shared_time, is_winner). Winners
+    are the candidates in the cluster that drove the sync. Empty unless the
+    project mixes A/V and motion capture (clap detection only runs then).
+    """
+    av_idx = [i for i, m in enumerate(media) if m.kind != "mocap"]
+    mocap_idx = [i for i, m in enumerate(media) if m.kind == "mocap"]
+    if not mocap_idx or not av_idx:
+        return []
+
+    av_media = [media[i] for i in av_idx]
+    av_align = Alignment(
+        [alignment.offsets[i] for i in av_idx],
+        [alignment.confidence[i] for i in av_idx],
+        [],
+    )
+    entries = _sound_candidates(
+        av_media, av_align, target_rate, per_track=_MARKERS_PER_TRACK,
+    )
+    usable = {k for _t, _s, k in entries}
+    anchor, winners = _best_cluster(entries, single_ok=len(usable) == 1)
+
+    markers: list[tuple[int, float, bool]] = []
+    for shared, _score, k in entries:
+        markers.append((av_idx[k], shared, (shared, k) in winners))
+    for i in mocap_idx:
+        if anchor is not None and alignment.confidence[i] > 0:
+            markers.append((i, anchor, True))
+    return markers
 
 
 def bridge_mocap_offsets(

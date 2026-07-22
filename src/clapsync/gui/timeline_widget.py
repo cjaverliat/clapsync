@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetricsF, QPainter, QPalette, QPen, QBrush, QPainterPath,
+    QPolygonF,
 )
 from PySide6.QtWidgets import QInputDialog, QScrollBar, QWidget
 
@@ -134,6 +135,8 @@ class TimelineWidget(QWidget):
         self.setMinimumHeight(HEADER_H + TRACK_H + TRACK_PAD * 2 + SCROLLBAR_H + 20)
 
         self._tracks: list[TrackState] = []
+        # (track index, shared seconds, is_winner)
+        self._clap_markers: list[tuple[int, float, bool]] = []
         self._playhead_s: float = 0.0
         self._zoom: float = 100.0   # px per second
         self._scroll_x: float = _SCROLL_MARGIN  # pixel x of time=0
@@ -239,9 +242,54 @@ class TimelineWidget(QWidget):
         painter.restore()
 
         self._paint_extras(painter, w, h, t)
+
+        painter.save()
+        painter.setClipRect(0, HEADER_H, w, track_area_h)
+        self._draw_clap_markers(painter)
+        painter.restore()
+
         self._draw_playhead(painter, h)
 
         painter.end()
+
+    def set_clap_markers(self, markers: list[tuple[int, float, bool]]) -> None:
+        """Mark detected claps: (track index, shared seconds, is_winner).
+
+        Winners are the claps that drove the sync; the rest are other detected
+        candidates, drawn dimmer.
+        """
+        self._clap_markers = list(markers)
+        self.update()
+
+    def _draw_clap_markers(self, painter: QPainter) -> None:
+        """Draw a flag on each track lane where a clap was detected.
+
+        The sync-driving winners are amber; other candidates are dim grey.
+        Winners are drawn last so they sit on top.
+        """
+        by_index = {track.index: track for track in self._tracks}
+        winner = QColor("#FFD54F")
+        other = QColor("#888888")
+        for index, shared_s, is_winner in sorted(
+            self._clap_markers, key=lambda m: m[2]
+        ):
+            track = by_index.get(index)
+            if track is None:
+                continue
+            rect = self._track_rect(track)
+            x = self._s_to_x(shared_s)
+            color = winner if is_winner else other
+            painter.setPen(QPen(color, 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
+            size = 8 if is_winner else 6
+            flag = QPolygonF([
+                QPointF(x, rect.top()),
+                QPointF(x + size, rect.top()),
+                QPointF(x, rect.top() + size),
+            ])
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(flag)
 
     def _paint_extras(self, painter: QPainter, w: int, h: int, t: dict) -> None:
         """Hook for subclasses to paint additional overlays before the playhead."""
