@@ -43,7 +43,8 @@ class C3DMarkerPreviewWidget(QWidget):
         self.setStyleSheet("background-color: #101010;")
         self._subset: list[int] | None = None
         self._extent = self._compute_extent(None)
-        self._center = self._mean_center(None)
+        self._fallback_center = self._mean_center(None)
+        self._center = self._fallback_center
 
     def set_groups(self, top: list[int], bottom: list[int]) -> None:
         """Colorize the arm groups and fit the camera tightly to them."""
@@ -51,11 +52,10 @@ class C3DMarkerPreviewWidget(QWidget):
         self._bottom = bottom
         # Frame the clapperboard markers, not the whole scene, and size the view
         # to their per-frame span (not their travel across the take) so the
-        # preview opens zoomed in on the arms. The camera is then fixed — only
-        # the user's drag/zoom moves it.
+        # preview opens zoomed in on the arms and follows them across the take.
         self._subset = top + bottom
         self._extent = self._compute_extent(self._subset)
-        self._center = self._mean_center(self._subset)
+        self._fallback_center = self._mean_center(self._subset)
         self.update()
 
     def set_frame(self, frame: int) -> None:
@@ -76,11 +76,18 @@ class C3DMarkerPreviewWidget(QWidget):
         return extent or 1.0
 
     def _mean_center(self, subset: list[int] | None) -> np.ndarray:
-        """Fixed camera center: mean of all valid markers in the subset."""
+        """Fallback center: mean of all valid markers (used when a frame is empty)."""
         pts = self._points[:, subset] if subset else self._points
         mask = self._valid[:, subset] if subset else self._valid
         valid = pts[mask]
         return valid.mean(axis=0) if valid.size else np.zeros(3)
+
+    def _frame_center(self, frame: int) -> np.ndarray:
+        """Center on the current frame's markers so the view follows them."""
+        idx = self._subset if self._subset is not None else slice(None)
+        pts = self._points[frame][idx]
+        mask = self._valid[frame][idx]
+        return pts[mask].mean(axis=0) if mask.any() else self._fallback_center
 
     def _project(self, p: np.ndarray) -> tuple[float, float]:
         """Orthographic turntable projection; +Z up."""
@@ -97,6 +104,7 @@ class C3DMarkerPreviewWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#101010"))
 
+        self._center = self._frame_center(self._frame)  # follow the markers
         w, h = self.width(), self.height()
         scale = _FILL * min(w, h) / self._extent * self._zoom
         cx, cy = w / 2.0, h / 2.0

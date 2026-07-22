@@ -352,12 +352,11 @@ class SyncEditorWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self).activated.connect(self._on_play_pause)
         self._prev_frame_btn.clicked.connect(lambda: self._step_frame(-1))
         self._next_frame_btn.clicked.connect(lambda: self._step_frame(1))
-        QShortcut(QKeySequence(Qt.Key.Key_Left), self).activated.connect(
-            lambda: self._step_frame(-1)
-        )
-        QShortcut(QKeySequence(Qt.Key.Key_Right), self).activated.connect(
-            lambda: self._step_frame(1)
-        )
+        # Application-wide so a focused scrollbar/button doesn't swallow arrows.
+        for key, direction in ((Qt.Key.Key_Left, -1), (Qt.Key.Key_Right, 1)):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            shortcut.activated.connect(lambda d=direction: self._step_frame(d))
         self._timeline.playhead_changed.connect(self._on_playhead_seek)
         self._timeline.offsets_changed.connect(self._on_offsets_changed)
         if self._set_c3d_btn is not None:
@@ -628,6 +627,13 @@ class SyncEditorWindow(QMainWindow):
             self._group_worker.cmd("play")
         self._timeline.set_playhead(global_s)
         self._update_time_label(global_s)
+        self._update_mocap_previews(global_s)
+
+    def _update_mocap_previews(self, global_s: float) -> None:
+        """Show each c3d's frame for the shared time (offset -> local -> frame)."""
+        for idx, preview in self._mocap_previews.items():
+            rate = self._video_infos[idx].point_rate or 0.0
+            preview.set_frame(round((global_s - self._offsets[idx]) * rate))
 
     @Slot(list)
     def _on_offsets_changed(self, offsets: list[float]) -> None:
@@ -755,9 +761,7 @@ class SyncEditorWindow(QMainWindow):
         self._update_time_label(global_s)
         for wf in self._waveforms.values():
             wf.set_playhead(global_s)
-        for idx, preview in self._mocap_previews.items():
-            rate = self._video_infos[idx].point_rate or 0.0
-            preview.set_frame(round((global_s - self._offsets[idx]) * rate))
+        self._update_mocap_previews(global_s)
         if self._is_playing and global_s >= self._trim_end - 0.05:
             if self._loop_checkbox.isChecked():
                 self._restart_from_trim_start()
