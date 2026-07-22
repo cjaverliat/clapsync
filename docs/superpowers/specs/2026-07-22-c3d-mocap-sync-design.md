@@ -30,8 +30,11 @@ directly (each c3d syncs to the A/V clap independently).
 - **Clap anchor:** auto-pick, gated by cross-track agreement (see below).
 - **c3d library:** `c3d` (py-c3d, pure-Python, pip). Fallback to `ezc3d` only
   if py-c3d fails to round-trip the user's real files (validated in Phase A).
-- **3D preview:** `QOpenGLWidget`, with a 2D `QPainter`-projected fallback if GL
-  init fails.
+- **3D preview:** portable 2D `QPainter` orthographic turntable projection of
+  the markers. (Chosen over `QOpenGLWidget` during implementation: the endorsed
+  premortem mandated a QPainter fallback for the mixed installer target anyway,
+  the marker count is tiny so no GPU is needed, and it needs no GL context —
+  which RDP / no-GPU machines cannot be assumed to provide.)
 - **Export padding:** trim to the shared window, pad regions outside c3d
   coverage with **invalid** frames (residual = −1), matching audio silence-pad.
 - **A/V offset convention is trusted and locked:** `shared = local + offset`

@@ -226,10 +226,14 @@ def detect_clap_motion(
     if span <= 0.0 or valid_gap.min() > _MIN_COLLAPSE_RATIO * valid_gap.max():
         return None  # gap never collapses -> not a clap
 
+    # Interpolate across dropouts so velocity and the sub-frame refine stay
+    # finite even when the markers occlude right at contact.
+    filled = _fill_nan(gap)
+
     # Closing velocity (positive as the gap shrinks). Occlusion right at impact
     # can NaN the minimum, so key the event on peak closing speed, which occurs
     # just before contact and survives a dropout at the very bottom.
-    velocity = -np.gradient(_fill_nan(gap))
+    velocity = -np.gradient(filled)
     peak = int(np.argmax(velocity))
     median_speed = np.median(np.abs(velocity)) + 1e-12
     sharpness = velocity[peak] / median_speed
@@ -243,7 +247,7 @@ def detect_clap_motion(
         if velocity[f] <= 0.0:
             impact = f
             break
-    time = _parabolic_vertex(-gap, impact) / rate
+    time = _parabolic_vertex(-filled, impact) / rate
     score = float(min(1.0, sharpness / (2 * _MIN_CLOSING_SHARPNESS)))
     return ClapCandidate(time=time, score=score)
 
