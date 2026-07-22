@@ -149,12 +149,11 @@ def main() -> None:
     )
 
     marker_choices = _resolve_marker_choices(video_paths)
-    result = compute_offsets_with_progress(
+    alignment = compute_offsets_with_progress(
         video_paths, marker_choices=marker_choices
     )
-    if result is None:
+    if alignment is None:
         sys.exit(0)
-    alignment, sound_claps = result
     offsets = alignment.offsets
 
     if alignment.warnings:
@@ -182,7 +181,7 @@ def main() -> None:
     low = [c < LOW_CONFIDENCE for c in alignment.confidence]
     window = SyncEditorWindow(
         video_paths=video_paths, offsets=offsets, use_proxies=use_proxies,
-        low_confidence=low, sound_claps=sound_claps,
+        low_confidence=low,
     )
     window.showMaximized()
     sys.exit(app.exec())
