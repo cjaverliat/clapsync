@@ -134,8 +134,10 @@ class SyncEditorWindow(QMainWindow):
         root.setSpacing(6)
 
         # ── Video preview ─────────────────────────────────────────────────────
+        # Audio waveforms go in their own stacked panel below, so only the
+        # visual sources (video, motion capture) tile the mosaic.
         _MIN_CELL_W = 200
-        n = len(self._video_infos)
+        n = sum(1 for info in self._video_infos if info.kind != "audio")
         available_w = self.width() - 16
         if n > 0 and available_w // n >= _MIN_CELL_W:
             cols = n
@@ -165,7 +167,19 @@ class SyncEditorWindow(QMainWindow):
         self._video_slots: list[int] = []
         self._waveforms: dict[int, WaveformWidget] = {}
         self._mocap_previews: dict[int, C3DMarkerPreviewWidget] = {}
+
+        # Vertical audio panel: full-width waveforms stack better than mosaic cells.
+        audio_panel = QWidget()
+        audio_layout = QVBoxLayout(audio_panel)
+        audio_layout.setContentsMargins(0, 0, 0, 0)
+        audio_layout.setSpacing(3)
+
+        slot = 0  # grid position among visual (non-audio) tracks
         for i, info in enumerate(self._video_infos):
+            if info.kind == "audio":
+                self._waveforms[i] = self._build_audio_row(audio_layout, info)
+                continue
+
             cell = QWidget()
             cell_layout = QVBoxLayout(cell)
             cell_layout.setContentsMargins(0, 0, 0, 0)
@@ -183,30 +197,23 @@ class SyncEditorWindow(QMainWindow):
                 cell_layout.addWidget(player, stretch=1)
                 self._players.append(player)
                 self._video_slots.append(i)
-            elif info.kind == "mocap":
+            else:  # mocap
                 preview = self._build_mocap_preview(i, info)
                 cell_layout.addWidget(preview, stretch=1)
                 self._mocap_previews[i] = preview
-            else:
-                wf = WaveformWidget()
-                cell_layout.addWidget(wf, stretch=1)
-                try:
-                    waveform, _rate = load_audio(info.path, target_rate=16000)
-                    wf.set_waveform(waveform.reshape(-1).cpu().numpy())
-                except Exception as exc:
-                    logger.warning(
-                        "failed to load waveform for %s: %s", info.path.name, exc
-                    )
-                self._waveforms[i] = wf
 
-            grid.addWidget(cell, i // cols, i % cols)
+            grid.addWidget(cell, slot // cols, slot % cols)
+            slot += 1
 
         # Attach overlay as child of mosaic (after grid children so raise_() works)
         self._loading_overlay.setParent(mosaic)
         self._loading_overlay.setGeometry(0, 0, mosaic.width(), mosaic.height())
         self._loading_overlay.raise_()
 
-        root.addWidget(mosaic, stretch=3)
+        if slot > 0:  # at least one visual source
+            root.addWidget(mosaic, stretch=3)
+        if self._waveforms:
+            root.addWidget(audio_panel, stretch=1 if slot > 0 else 3)
 
         # ── Controls row (above timeline) ─────────────────────────────────────
         controls_widget = QWidget()
@@ -273,6 +280,36 @@ class SyncEditorWindow(QMainWindow):
         self._export_btn.setFixedWidth(100)
         bottom.addWidget(self._export_btn)
         root.addLayout(bottom)
+
+    def _build_audio_row(
+        self, layout: QVBoxLayout, info: MediaInfo
+    ) -> WaveformWidget:
+        """Add a full-width waveform row (name + waveform) to the audio panel."""
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        name_lbl = QLabel(info.path.name)
+        name_lbl.setFixedWidth(150)
+        name_lbl.setToolTip(info.path.name)
+        name_lbl.setStyleSheet("font-size: 10px; color: #555;")
+
+        wf = WaveformWidget()
+        wf.setMinimumHeight(56)
+        wf.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        try:
+            waveform, _rate = load_audio(info.path, target_rate=16000)
+            wf.set_waveform(waveform.reshape(-1).cpu().numpy())
+        except Exception as exc:
+            logger.warning(
+                "failed to load waveform for %s: %s", info.path.name, exc
+            )
+
+        row_layout.addWidget(name_lbl)
+        row_layout.addWidget(wf, stretch=1)
+        layout.addWidget(row)
+        return wf
 
     def _build_mocap_preview(
         self, index: int, info: MediaInfo
