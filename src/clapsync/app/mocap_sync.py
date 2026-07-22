@@ -108,11 +108,13 @@ def _best_cluster(
     accepted = [c for c in clusters if len(c["tracks"]) >= 2 or single_ok]
     if not accepted:
         return None, set()
-    # Prefer the clap the most tracks agree on; on a tie prefer the earliest
-    # (a slate is typically clapped at the start of a take). members are
+    # Prefer the clap the most tracks agree on; break ties by total score (the
+    # real slate is far louder/sharper/more broadband than stray transients,
+    # once camera shake is gated out), then by earliest. members are
     # time-sorted, so members[0][0] is the cluster's earliest detection.
     best = max(
-        accepted, key=lambda c: (len(c["tracks"]), -c["members"][0][0])
+        accepted,
+        key=lambda c: (len(c["tracks"]), sum(c["scores"]), -c["members"][0][0]),
     )
     weights = np.array(best["scores"])
     times = np.array([t for t, _track in best["members"]])
