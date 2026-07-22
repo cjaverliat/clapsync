@@ -8,9 +8,21 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
+from clapsync import diagnostics
 from clapsync.gui.media_selection_dialog import MediaSelectionDialog
 
 logger = logging.getLogger(__name__)
+
+
+def _report_crash(exc: BaseException) -> None:
+    """Show a dialog pointing at the log file after an uncaught exception."""
+    log_file = diagnostics.log_dir() / "clapsync.log"
+    QMessageBox.critical(
+        None,
+        "clapsync crashed",
+        f"An unexpected error occurred:\n\n{exc}\n\n"
+        f"A full report was saved to:\n{log_file}",
+    )
 
 
 def _decide_use_proxies(video_paths: list, forced: bool) -> bool:
@@ -25,12 +37,16 @@ def _decide_use_proxies(video_paths: list, forced: bool) -> bool:
         forced: True if ``--use_proxies`` was passed.
     """
     if forced:
+        logger.info("proxies: forced on via --use_proxies")
         return True
     from clapsync.app.decode import source_needs_preview_proxy
     from clapsync.app.media import probe
     if not any(source_needs_preview_proxy(probe(p)) for p in video_paths):
+        logger.info("proxies: skipped, no source exceeds 1080p")
         return False
-    return _prompt_use_proxies()
+    answer = _prompt_use_proxies()
+    logger.info("proxies: high-res source detected, user chose %s", answer)
+    return answer
 
 
 def _prompt_use_proxies() -> bool:
@@ -67,12 +83,13 @@ def main() -> None:
     )
     args, qt_args = parser.parse_known_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+    log_file = diagnostics.configure_logging(verbose=args.verbose)
+    diagnostics.install_excepthook(on_exception=_report_crash)
+    diagnostics.log_startup_context()
+    logger.info("logging to %s", log_file)
 
     app = QApplication([sys.argv[0], *qt_args])
+    diagnostics.install_qt_message_handler()
 
     # Allow CTRL+C to quit the Qt event loop.
     signal.signal(signal.SIGINT, lambda *_: app.quit())
@@ -86,6 +103,7 @@ def main() -> None:
         sys.exit(0)
 
     video_paths = sel.get_media_paths()
+    diagnostics.log_inputs(video_paths)
 
     # Deferred: importing these pulls torch/torchaudio/framepipe (~3s + CUDA
     # init). Keeping them out of module scope lets the selection dialog above
