@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
+import numpy as np
 from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetricsF, QPainter, QPalette, QPen, QBrush, QPainterPath,
     QPolygonF,
 )
 from PySide6.QtWidgets import QInputDialog, QScrollBar, QWidget
+
+from clapsync.gui.waveform_widget import downsample_peaks
 
 HEADER_H = 28
 TRACK_H = 40
@@ -135,6 +139,8 @@ class TimelineWidget(QWidget):
         self.setMinimumHeight(HEADER_H + TRACK_H + TRACK_PAD * 2 + SCROLLBAR_H + 20)
 
         self._tracks: list[TrackState] = []
+        self._track_waveforms: dict[int, np.ndarray] = {}  # track index -> mono
+        self._wave_cache: dict[int, tuple] = {}  # index -> (sig, x0, peaks)
         # (track index, shared seconds, is_selected, kind) kind: sound|movement
         self._clap_markers: list[tuple[int, float, bool, str]] = []
         self._playhead_s: float = 0.0
@@ -370,6 +376,8 @@ class TimelineWidget(QWidget):
             color = track.color
             painter.fillRect(rect, color)
 
+            self._draw_track_waveform(painter, track, rect, w)
+
             darker = color.darker(140)
             painter.setPen(QPen(darker, 1))
             painter.drawRect(rect)
@@ -379,6 +387,49 @@ class TimelineWidget(QWidget):
                 icon_cx = rect.left() + icon_size * 0.5 + 6.0
                 icon_cy = rect.center().y()
                 self._draw_lock_icon(painter, icon_cx, icon_cy, icon_size)
+
+    def set_track_waveforms(self, waveforms: dict[int, np.ndarray]) -> None:
+        """Provide mono samples to render inside each track's clip bar."""
+        self._track_waveforms = dict(waveforms)
+        self._wave_cache.clear()
+        self.update()
+
+    def _draw_track_waveform(
+        self, painter: QPainter, track: TrackState, rect: QRectF, w: int
+    ) -> None:
+        """Draw the track's waveform inside its clip bar, slightly darker.
+
+        Only the visible span is peak-reduced, cached against zoom/scroll so
+        the per-playhead repaints stay cheap.
+        """
+        wave = self._track_waveforms.get(track.index)
+        if wave is None or wave.size == 0 or rect.width() < 2:
+            return
+        x0 = max(int(rect.left()), 0)
+        x1 = min(int(math.ceil(rect.right())), w)
+        if x1 <= x0:
+            return
+
+        sig = (round(self._zoom, 4), round(self._scroll_x, 1), x0, x1)
+        cached = self._wave_cache.get(track.index)
+        if cached is not None and cached[0] == sig:
+            peaks = cached[1]
+        else:
+            span = rect.width()
+            n = wave.size
+            lo = max(0, int((x0 - rect.left()) / span * n))
+            hi = min(n, int((x1 - rect.left()) / span * n))
+            peaks = downsample_peaks(wave[lo:hi], x1 - x0)
+            self._wave_cache[track.index] = (sig, peaks)
+
+        wave_color = track.color.darker(145)
+        painter.setPen(QPen(wave_color, 1))
+        mid = rect.center().y()
+        half = rect.height() * 0.45
+        for k in range(peaks.shape[0]):
+            ymax = mid - float(peaks[k, 1]) * half
+            ymin = mid - float(peaks[k, 0]) * half
+            painter.drawLine(x0 + k, int(ymax), x0 + k, int(ymin))
 
     def _draw_playhead(self, painter: QPainter, h: int) -> None:
         x = self._s_to_x(self._playhead_s)

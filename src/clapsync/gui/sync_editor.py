@@ -43,7 +43,6 @@ from clapsync.gui.export_dialog import ExportDialog, fmt_time
 from clapsync.gui.video_player import VideoPlayerWidget, VideoGroupWorker
 from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
 from clapsync.gui.track_panel import TrackHeaderPanel
-from clapsync.gui.waveform_widget import WaveformWidget
 from clapsync.gui.workers import ExportWorker
 
 logger = logging.getLogger(__name__)
@@ -170,19 +169,20 @@ class SyncEditorWindow(QMainWindow):
 
         self._players: list[VideoPlayerWidget] = []
         self._video_slots: list[int] = []
-        self._waveforms: dict[int, WaveformWidget] = {}
         self._mocap_previews: dict[int, C3DMarkerPreviewWidget] = {}
-
-        # Vertical audio panel: full-width waveforms stack better than mosaic cells.
-        audio_panel = QWidget()
-        audio_layout = QVBoxLayout(audio_panel)
-        audio_layout.setContentsMargins(0, 0, 0, 0)
-        audio_layout.setSpacing(3)
+        # Audio waveforms render inside their timeline lanes, not as widgets.
+        self._track_waves: dict[int, np.ndarray] = {}
 
         slot = 0  # grid position among visual (non-audio) tracks
         for i, info in enumerate(self._video_infos):
             if info.kind == "audio":
-                self._waveforms[i] = self._build_audio_row(audio_layout, info)
+                try:
+                    wave, _rate = load_audio(info.path, target_rate=16000)
+                    self._track_waves[i] = wave.reshape(-1).cpu().numpy()
+                except Exception as exc:
+                    logger.warning(
+                        "failed to load waveform for %s: %s", info.path.name, exc
+                    )
                 continue
 
             cell = QWidget()
@@ -217,8 +217,6 @@ class SyncEditorWindow(QMainWindow):
 
         if slot > 0:  # at least one visual source
             root.addWidget(mosaic, stretch=3)
-        if self._waveforms:
-            root.addWidget(audio_panel, stretch=1 if slot > 0 else 3)
 
         # ── Controls row (above timeline) ─────────────────────────────────────
         controls_widget = QWidget()
@@ -285,36 +283,6 @@ class SyncEditorWindow(QMainWindow):
         self._export_btn.setFixedWidth(100)
         bottom.addWidget(self._export_btn)
         root.addLayout(bottom)
-
-    def _build_audio_row(
-        self, layout: QVBoxLayout, info: MediaInfo
-    ) -> WaveformWidget:
-        """Add a full-width waveform row (name + waveform) to the audio panel."""
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(6)
-
-        name_lbl = QLabel(info.path.name)
-        name_lbl.setFixedWidth(150)
-        name_lbl.setToolTip(info.path.name)
-        name_lbl.setStyleSheet("font-size: 10px; color: #555;")
-
-        wf = WaveformWidget()
-        wf.setMinimumHeight(56)
-        wf.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        try:
-            waveform, _rate = load_audio(info.path, target_rate=16000)
-            wf.set_waveform(waveform.reshape(-1).cpu().numpy())
-        except Exception as exc:
-            logger.warning(
-                "failed to load waveform for %s: %s", info.path.name, exc
-            )
-
-        row_layout.addWidget(name_lbl)
-        row_layout.addWidget(wf, stretch=1)
-        layout.addWidget(row)
-        return wf
 
     def _build_mocap_preview(
         self, index: int, info: MediaInfo
@@ -413,16 +381,9 @@ class SyncEditorWindow(QMainWindow):
         ]
         self._timeline.set_tracks(tracks)
         self._track_panel.set_tracks(tracks)
+        self._timeline.set_track_waveforms(self._track_waves)
         self._rebuild_clap_markers()
         self._trim_start, self._trim_end = self._timeline.get_trim()
-        self._update_waveform_windows()
-
-    def _update_waveform_windows(self) -> None:
-        for idx, wf in self._waveforms.items():
-            info = self._video_infos[idx]
-            wf.set_window(
-                self._offsets[idx], info.duration, self._trim_start, self._trim_end
-            )
 
     def _init_audio(self) -> None:
         self._audio = AudioEngine(self)
@@ -644,7 +605,6 @@ class SyncEditorWindow(QMainWindow):
             self._group_worker.cmd("update_offsets", video_offsets)
         # Trim bounds may have been adjusted by _clamp_trim_to_tracks in the timeline.
         self._trim_start, self._trim_end = self._timeline.get_trim()
-        self._update_waveform_windows()
         clamped = max(self._trim_start, min(self._trim_end, self._global_pos))
         self._global_pos = clamped
         self._sync_seek_all(clamped)
@@ -730,7 +690,6 @@ class SyncEditorWindow(QMainWindow):
     def _on_trim_changed(self, trim_start: float, trim_end: float) -> None:
         self._trim_start = trim_start
         self._trim_end = trim_end
-        self._update_waveform_windows()
         clamped = max(trim_start, min(trim_end, self._global_pos))
         if clamped != self._global_pos:
             self._global_pos = clamped
@@ -759,8 +718,6 @@ class SyncEditorWindow(QMainWindow):
         self._global_pos = global_s
         self._timeline.set_playhead(global_s)
         self._update_time_label(global_s)
-        for wf in self._waveforms.values():
-            wf.set_playhead(global_s)
         self._update_mocap_previews(global_s)
         if self._is_playing and global_s >= self._trim_end - 0.05:
             if self._loop_checkbox.isChecked():
