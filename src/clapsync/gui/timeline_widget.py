@@ -493,6 +493,22 @@ class TimelineWidget(QWidget):
         self._update_scrollbar()
         self.update()
 
+    def zoom_by(self, factor: float, anchor_x: float | None = None) -> None:
+        """Scale the horizontal zoom about a pixel anchor (viewport center)."""
+        if anchor_x is None:
+            anchor_x = self._content_w() / 2.0
+        t = self._x_to_s(anchor_x)
+        new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, self._zoom * factor))
+        self._scroll_x = anchor_x - t * new_zoom
+        self._zoom = new_zoom
+        self._update_scrollbar()
+        self.update()
+
+    def zoom_to_fit(self) -> None:
+        """Fit the whole timeline in the viewport."""
+        self._fit_zoom()
+        self.update()
+
     # ---------------------------------------------------------------- helpers
 
     def _s_to_x(self, seconds: float) -> float:

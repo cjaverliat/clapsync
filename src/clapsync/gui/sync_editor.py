@@ -244,6 +244,16 @@ class SyncEditorWindow(QMainWindow):
         controls.addWidget(self._time_label)
         controls.addStretch()
 
+        self._zoom_out_btn = QPushButton(icons.icon("zoom-out"), "")
+        self._zoom_in_btn = QPushButton(icons.icon("zoom-in"), "")
+        self._zoom_fit_btn = QPushButton(icons.icon("zoom-fit"), "")
+        for btn, tip in ((self._zoom_out_btn, "Zoom out"),
+                         (self._zoom_in_btn, "Zoom in"),
+                         (self._zoom_fit_btn, "Fit timeline")):
+            btn.setFixedWidth(32)
+            btn.setToolTip(tip)
+            controls.addWidget(btn)
+
         self._loop_checkbox = QCheckBox("Loop")
         self._loop_checkbox.setChecked(True)
         controls.addWidget(self._loop_checkbox)
@@ -320,6 +330,9 @@ class SyncEditorWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self).activated.connect(self._on_play_pause)
         self._prev_frame_btn.clicked.connect(lambda: self._step_frame(-1))
         self._next_frame_btn.clicked.connect(lambda: self._step_frame(1))
+        self._zoom_in_btn.clicked.connect(lambda: self._timeline.zoom_by(1.3))
+        self._zoom_out_btn.clicked.connect(lambda: self._timeline.zoom_by(1 / 1.3))
+        self._zoom_fit_btn.clicked.connect(self._timeline.zoom_to_fit)
         # Application-wide so a focused scrollbar/button doesn't swallow arrows.
         for key, direction in ((Qt.Key.Key_Left, -1), (Qt.Key.Key_Right, 1)):
             shortcut = QShortcut(QKeySequence(key), self)

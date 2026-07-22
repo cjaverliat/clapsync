@@ -28,6 +28,9 @@ _MDI = {
     "audio": "mdi6.music-note",
     "video": "mdi6.filmstrip",
     "mocap": "mdi6.motion",
+    "zoom-in": "mdi6.magnify-plus-outline",
+    "zoom-out": "mdi6.magnify-minus-outline",
+    "zoom-fit": "mdi6.fit-to-page-outline",
     "warning": "mdi6.alert",
 }
 
