@@ -6,6 +6,7 @@ known injected delay.
 """
 from __future__ import annotations
 
+import math
 import wave
 from pathlib import Path
 
@@ -102,10 +103,13 @@ def test_reference_never_c3d_and_markers_flag_winner(tmp_path: Path):
     _write_clap_wav(wav)
     _write_clap_c3d(c3d_path)
 
-    # c3d first in the list must not become the sync reference.
+    # c3d first in the list must not become the sync reference, and that
+    # fallback must be silent (no sync-quality warning).
     media = [probe(c3d_path), probe(wav)]
     alignment = align_media(media, reference_index=0, target_rate=16000)
-    assert any("reference must have audio" in w for w in alignment.warnings)
+    assert math.isinf(alignment.confidence[1])   # the wav is the reference
+    assert not math.isinf(alignment.confidence[0])  # not the c3d
+    assert not any("reference" in w for w in alignment.warnings)
     assert abs(alignment.offsets[0] - (AUDIO_CLAP_S - MOTION_CLAP_S)) < 0.05
 
     markers = clap_markers(media, alignment)

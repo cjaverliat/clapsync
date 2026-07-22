@@ -165,14 +165,9 @@ def align_media(
     )
     if not valid_ref:
         audio_refs = [i for i in av_idx if media[i].has_audio]
-        if audio_refs:
-            reference_index = audio_refs[0]
-            warnings.append(
-                "sync reference must have audio; using the first "
-                "audio-bearing track"
-            )
-        else:
-            reference_index = av_idx[0]  # no audio anywhere; will error below
+        # Reference fallback is normal (e.g. a c3d listed first) — log it, but
+        # keep it out of `warnings`, which surfaces as a sync-quality alert.
+        reference_index = audio_refs[0] if audio_refs else av_idx[0]
 
     logger.info(
         "sync reference: %s (%s)",
