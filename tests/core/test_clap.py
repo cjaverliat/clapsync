@@ -59,10 +59,14 @@ def test_detect_clap_sound_finds_broadband_burst():
 
 def test_detect_clap_sound_rejects_tonal_burst():
     rate, n = 16000, 16000
-    at = 8000
-    length = int(0.008 * rate)
+    at = 6000
+    length = int(0.2 * rate)  # sustained 1 kHz tone, smoothly ramped (no click)
+    ramp = int(0.005 * rate)
+    env = np.ones(length)
+    env[:ramp] = 0.5 - 0.5 * np.cos(np.pi * np.arange(ramp) / ramp)
+    env[-ramp:] = env[:ramp][::-1]
     t = np.arange(length) / rate
-    tone = np.sin(2 * np.pi * 1000 * t) * 3.0  # tonal -> low spectral flatness
+    tone = np.sin(2 * np.pi * 1000 * t) * env * 3.0  # low HF content -> rejected
     x = _burst(rate, n, at, length, tone)
 
     assert detect_clap_sound(x, rate) == []

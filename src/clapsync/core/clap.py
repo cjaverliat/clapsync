@@ -17,14 +17,19 @@ from dataclasses import dataclass
 import numpy as np
 
 # --- acoustic detection tuning ---------------------------------------------
+# Calibrated against real slate recordings, not synthetic bursts. On real audio
+# the clap is the loudest sharp-attack broadband transient; absolute spectral
+# flatness (~0 for any recording) and decay duration (inflated by room reverb)
+# do not discriminate, so the gate is attack + high-frequency content + loudness
+# relative to the track's own peak.
 _STFT_WIN = 1024
 _STFT_HOP = 256
 _ENVELOPE_MS = 5.0        # moving-RMS window for the sample-domain envelope
 _BURST_MS = 40.0          # analysis window after onset for spectral features
-_MAX_ATTACK_S = 0.010     # 10%->peak rise slower than this is not a clap
-_MAX_DURATION_S = 0.120   # decay-to-10% longer than this is not a clap
-_MIN_FLATNESS = 0.20      # spectral flatness below this is tonal, not a clap
-_MIN_CREST = 3.0          # peak/RMS below this is not impulsive
+_HF_CUTOFF_HZ = 2000.0    # boundary for the high-frequency-content ratio
+_MAX_ATTACK_S = 0.008     # 10%->peak rise slower than this is not a clap
+_MIN_HF_RATIO = 0.012     # fraction of burst energy above the HF cutoff
+_MIN_LOUDNESS_FRAC = 0.15  # peak must reach this fraction of the track's loudest
 
 # --- kinematic detection tuning --------------------------------------------
 _MIN_COLLAPSE_RATIO = 0.5  # gap must shrink to <= this fraction of its span
@@ -107,6 +112,7 @@ def detect_clap_sound(wave: np.ndarray, rate: int) -> list[ClapCandidate]:
         return []
 
     env = _moving_rms(x, max(1, int(_ENVELOPE_MS * 1e-3 * rate)))
+    env_max = float(env.max()) or 1.0
     burst = max(1, int(_BURST_MS * 1e-3 * rate))
     # An onset frame's window spans _STFT_WIN samples, so the true envelope peak
     # can sit up to a full window past the frame start — search that far.
@@ -116,7 +122,7 @@ def detect_clap_sound(wave: np.ndarray, rate: int) -> list[ClapCandidate]:
     for frame in onset_frames:
         onset = int(frame) * _STFT_HOP
         peak = _local_peak(env, onset, search)
-        cand = _score_candidate(x, env, peak, burst, rate)
+        cand = _score_candidate(x, env, env_max, peak, burst, rate)
         if cand is not None:
             candidates.append(cand)
 
@@ -125,40 +131,33 @@ def detect_clap_sound(wave: np.ndarray, rate: int) -> list[ClapCandidate]:
 
 
 def _score_candidate(
-    x: np.ndarray, env: np.ndarray, peak: int, burst: int, rate: int
+    x: np.ndarray, env: np.ndarray, env_max: float, peak: int, burst: int,
+    rate: int,
 ) -> ClapCandidate | None:
     """Feature-gate one onset and return a scored candidate, or None."""
     peak_val = env[peak]
-    if peak_val <= 0.0:
+    if peak_val <= 0.0 or peak_val < _MIN_LOUDNESS_FRAC * env_max:
         return None
 
     thresh = 0.1 * peak_val  # 10% of peak == -20 dB
     start = peak
     while start > 0 and env[start] > thresh:
         start -= 1
-    end = peak
-    while end < len(env) - 1 and env[end] > thresh:
-        end += 1
     attack = (peak - start) / rate
-    duration = (end - start) / rate
 
     window = x[peak : peak + burst]
     if window.size < 8:
         return None
-    flatness = _spectral_flatness(window)
-    rms = float(np.sqrt(np.mean(window * window))) + 1e-12
-    crest = float(np.max(np.abs(window))) / rms
+    hf = _hf_ratio(window, rate)
 
-    if (attack > _MAX_ATTACK_S or duration > _MAX_DURATION_S
-            or flatness < _MIN_FLATNESS or crest < _MIN_CREST):
+    if attack > _MAX_ATTACK_S or hf < _MIN_HF_RATIO:
         return None
 
-    # Each sub-score is in (0, 1]; the product demands quality on every axis.
+    # Rank by loudness x broadband content x attack sharpness; each factor is
+    # positive, so the loudest, sharpest, most broadband onset wins. Cross-track
+    # agreement in the sync bridge then disambiguates competing claps.
     sharpness = 1.0 - attack / _MAX_ATTACK_S
-    shortness = 1.0 - duration / _MAX_DURATION_S
-    score = flatness * sharpness * shortness * min(1.0, crest / (2 * _MIN_CREST))
-    if score <= 0.0:
-        return None
+    score = (peak_val / env_max) * hf * max(sharpness, 1e-3)
 
     time = _parabolic_vertex(env, peak) / rate
     return ClapCandidate(time=time, score=float(score))
@@ -188,15 +187,17 @@ def _pick_peaks(flux: np.ndarray) -> np.ndarray:
     return np.nonzero(hi & local)[0]
 
 
-def _spectral_flatness(window: np.ndarray) -> float:
-    """Wiener entropy of a burst: geometric mean / arithmetic mean of power."""
+def _hf_ratio(window: np.ndarray, rate: int) -> float:
+    """Fraction of burst energy above the HF cutoff.
+
+    A clap is broadband and keeps real energy in the high band; speech, music,
+    and rumble roll off. This survives real recordings where absolute spectral
+    flatness collapses to ~0 because low frequencies dominate every take.
+    """
     spec = np.abs(np.fft.rfft(window * np.hanning(len(window)))) ** 2
-    spec = spec[1:]  # drop DC
-    if spec.size == 0 or not np.any(spec):
-        return 0.0
-    geo = np.exp(np.mean(np.log(spec + 1e-12)))
-    arith = np.mean(spec) + 1e-12
-    return float(geo / arith)
+    freqs = np.fft.rfftfreq(len(window), 1.0 / rate)
+    total = spec.sum() + 1e-12
+    return float(spec[freqs > _HF_CUTOFF_HZ].sum() / total)
 
 
 # ---------------------------------------------------------------------------
