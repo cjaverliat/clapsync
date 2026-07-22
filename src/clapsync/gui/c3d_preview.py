@@ -19,6 +19,9 @@ _TOP_COLOR = QColor("#4FC3F7")
 _BOTTOM_COLOR = QColor("#FF8A65")
 _OTHER_COLOR = QColor("#BBBBBB")
 _MARKER_RADIUS = 3.0
+_FILL = 0.85          # fraction of the viewport the fitted markers span
+_MIN_ZOOM = 0.2
+_MAX_ZOOM = 20.0
 
 
 class C3DMarkerPreviewWidget(QWidget):
@@ -34,15 +37,25 @@ class C3DMarkerPreviewWidget(QWidget):
         self._bottom: list[int] = []
         self._azimuth = math.radians(30.0)
         self._elevation = math.radians(20.0)
+        self._zoom = 1.0
         self._last_drag: QPointF | None = None
         self.setMinimumSize(160, 90)
         self.setStyleSheet("background-color: #101010;")
-        self._center, self._extent = self._compute_bounds()
+        self._subset: list[int] | None = None
+        self._extent = self._compute_extent(None)
+        self._fallback_center = self._mean_center(None)
+        self._center = self._fallback_center
 
     def set_groups(self, top: list[int], bottom: list[int]) -> None:
-        """Colorize the top- and bottom-arm marker groups."""
+        """Colorize the arm groups and fit the camera tightly to them."""
         self._top = top
         self._bottom = bottom
+        # Frame the clapperboard markers, not the whole scene, and size the view
+        # to their per-frame span (not their travel across the take) so the
+        # preview opens zoomed in on the arms.
+        self._subset = top + bottom
+        self._extent = self._compute_extent(self._subset)
+        self._fallback_center = self._mean_center(self._subset)
         self.update()
 
     def set_frame(self, frame: int) -> None:
@@ -51,16 +64,30 @@ class C3DMarkerPreviewWidget(QWidget):
             self._frame = frame
             self.update()
 
-    def _compute_bounds(self) -> tuple[np.ndarray, float]:
-        """Center and extent over all valid markers, for a stable camera."""
-        pts = self._points[self._valid]
-        if pts.size == 0:
-            return np.zeros(3), 1.0
-        lo = pts.min(axis=0)
-        hi = pts.max(axis=0)
-        center = (lo + hi) / 2.0
-        extent = float(np.max(hi - lo)) or 1.0
-        return center, extent
+    def _compute_extent(self, subset: list[int] | None) -> float:
+        """Median per-frame marker span — the clapperboard's size, not travel."""
+        pts = self._points[:, subset] if subset else self._points
+        mask = self._valid[:, subset] if subset else self._valid
+        p = np.where(mask[:, :, None], pts, np.nan)
+        lo = np.nanmin(p, axis=1)
+        hi = np.nanmax(p, axis=1)
+        span = np.nanmax(hi - lo, axis=1)
+        extent = float(np.nanmedian(span[np.isfinite(span)])) if span.size else 0.0
+        return extent or 1.0
+
+    def _mean_center(self, subset: list[int] | None) -> np.ndarray:
+        """Fallback center: mean of all valid markers (used when a frame is empty)."""
+        pts = self._points[:, subset] if subset else self._points
+        mask = self._valid[:, subset] if subset else self._valid
+        valid = pts[mask]
+        return valid.mean(axis=0) if valid.size else np.zeros(3)
+
+    def _frame_center(self, frame: int) -> np.ndarray:
+        """Center on the current frame's markers so the view follows them."""
+        idx = self._subset if self._subset is not None else slice(None)
+        pts = self._points[frame][idx]
+        mask = self._valid[frame][idx]
+        return pts[mask].mean(axis=0) if mask.any() else self._fallback_center
 
     def _project(self, p: np.ndarray) -> tuple[float, float]:
         """Orthographic turntable projection; +Z up."""
@@ -77,8 +104,9 @@ class C3DMarkerPreviewWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#101010"))
 
+        self._center = self._frame_center(self._frame)  # follow the markers
         w, h = self.width(), self.height()
-        scale = 0.4 * min(w, h) / self._extent
+        scale = _FILL * min(w, h) / self._extent * self._zoom
         cx, cy = w / 2.0, h / 2.0
         frame_pts = self._points[self._frame]
         frame_valid = self._valid[self._frame]
@@ -138,3 +166,8 @@ class C3DMarkerPreviewWidget(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         self._last_drag = None
+
+    def wheelEvent(self, event) -> None:
+        factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
+        self._zoom = max(_MIN_ZOOM, min(_MAX_ZOOM, self._zoom * factor))
+        self.update()
