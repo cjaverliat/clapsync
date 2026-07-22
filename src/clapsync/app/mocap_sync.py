@@ -51,7 +51,9 @@ def detect_sound_anchor(
     Returns:
         Shared-timeline clap time in seconds, or None if no reliable anchor.
     """
-    entries = _sound_candidates(av_media, av_align, target_rate, per_track=3)
+    entries = _sound_candidates(
+        av_media, av_align, target_rate, per_track=_MARKERS_PER_TRACK,
+    )
     if not entries:
         return None
     usable = {k for _t, _s, k in entries}
@@ -106,11 +108,33 @@ def _best_cluster(
     accepted = [c for c in clusters if len(c["tracks"]) >= 2 or single_ok]
     if not accepted:
         return None, set()
-    best = max(accepted, key=lambda c: (len(c["tracks"]), sum(c["scores"])))
+    # Prefer the clap the most tracks agree on; on a tie prefer the earliest
+    # (a slate is typically clapped at the start of a take). members are
+    # time-sorted, so members[0][0] is the cluster's earliest detection.
+    best = max(
+        accepted, key=lambda c: (len(c["tracks"]), -c["members"][0][0])
+    )
     weights = np.array(best["scores"])
     times = np.array([t for t, _track in best["members"]])
     anchor = float((weights * times).sum() / weights.sum())
     return anchor, set(best["members"])
+
+
+def motion_clap_time(info: MediaInfo) -> float | None:
+    """Local time of a c3d's clapperboard motion clap, or None if not found."""
+    if info.kind != "mocap":
+        return None
+    data = load_c3d(info.path)
+    choice = clap.classify_clap_markers(data.labels)
+    if choice is None:
+        return None
+    top, bottom = choice
+    motion = clap.detect_clap_motion(
+        clap.centroid(data.points[:, top], data.valid[:, top]),
+        clap.centroid(data.points[:, bottom], data.valid[:, bottom]),
+        data.point_rate,
+    )
+    return motion.time if motion is not None else None
 
 
 def clap_markers(
@@ -119,9 +143,10 @@ def clap_markers(
     """Detected clap positions for the timeline.
 
     Surfaces every clap-sound candidate found in the A/V tracks, plus each
-    synced c3d's motion clap, as (track_index, shared_time, is_winner). Winners
-    are the candidates in the cluster that drove the sync. Empty unless the
-    project mixes A/V and motion capture (clap detection only runs then).
+    synced c3d's motion clap, as (track_index, shared_time, is_winner). A c3d
+    marker sits at its *actual* synced position (offset + motion time), so it
+    always lands on the c3d lane and matches the preview animation. A/V
+    candidates are winners when they agree with a synced c3d's clap.
     """
     av_idx = [i for i, m in enumerate(media) if m.kind != "mocap"]
     mocap_idx = [i for i, m in enumerate(media) if m.kind == "mocap"]
@@ -137,15 +162,21 @@ def clap_markers(
     entries = _sound_candidates(
         av_media, av_align, target_rate, per_track=_MARKERS_PER_TRACK,
     )
-    usable = {k for _t, _s, k in entries}
-    anchor, winners = _best_cluster(entries, single_ok=len(usable) == 1)
 
     markers: list[tuple[int, float, bool]] = []
-    for shared, _score, k in entries:
-        markers.append((av_idx[k], shared, (shared, k) in winners))
+    clap_positions: list[float] = []
     for i in mocap_idx:
-        if anchor is not None and alignment.confidence[i] > 0:
-            markers.append((i, anchor, True))
+        motion = motion_clap_time(media[i])
+        if motion is not None and alignment.confidence[i] > 0:
+            position = alignment.offsets[i] + motion
+            clap_positions.append(position)
+            markers.append((i, position, True))
+
+    for shared, _score, k in entries:
+        winner = any(
+            abs(shared - pos) <= _ANCHOR_TOL_S for pos in clap_positions
+        )
+        markers.append((av_idx[k], shared, winner))
     return markers
 
 

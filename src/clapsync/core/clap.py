@@ -28,6 +28,7 @@ _ENVELOPE_MS = 5.0        # moving-RMS window for the sample-domain envelope
 _BURST_MS = 40.0          # analysis window after onset for spectral features
 _HF_CUTOFF_HZ = 2000.0    # boundary for the high-frequency-content ratio
 _MAX_ATTACK_S = 0.008     # 10%->peak rise slower than this is not a clap
+_MAX_CORE_S = 0.018       # duration above -6 dB; camera shake sustains longer
 _MIN_HF_RATIO = 0.012     # fraction of burst energy above the HF cutoff
 _MIN_LOUDNESS_FRAC = 0.15  # peak must reach this fraction of the track's loudest
 
@@ -126,8 +127,21 @@ def detect_clap_sound(wave: np.ndarray, rate: int) -> list[ClapCandidate]:
         if cand is not None:
             candidates.append(cand)
 
-    candidates.sort(key=lambda c: c.score, reverse=True)
-    return candidates
+    return _dedupe(candidates)
+
+
+def _dedupe(candidates: list[ClapCandidate]) -> list[ClapCandidate]:
+    """Collapse candidates that resolve to the same event, keep the best.
+
+    Adjacent onset frames can localize to one envelope peak, yielding several
+    candidates at essentially the same time; keep only the highest-scoring one
+    per neighbourhood.
+    """
+    kept: list[ClapCandidate] = []
+    for cand in sorted(candidates, key=lambda c: c.score, reverse=True):
+        if all(abs(cand.time - k.time) > _BURST_MS * 1e-3 for k in kept):
+            kept.append(cand)
+    return kept
 
 
 def _score_candidate(
@@ -145,12 +159,25 @@ def _score_candidate(
         start -= 1
     attack = (peak - start) / rate
 
+    # Core duration at -6 dB (50% of peak): a clap is an impulse whose energy
+    # collapses at once; camera shake and handling noise stay loud for longer.
+    # Measured at -6 dB, not -20 dB, so a reverb tail does not inflate it.
+    half = 0.5 * peak_val
+    core_start = peak
+    while core_start > 0 and env[core_start] > half:
+        core_start -= 1
+    core_end = peak
+    while core_end < len(env) - 1 and env[core_end] > half:
+        core_end += 1
+    core = (core_end - core_start) / rate
+
     window = x[peak : peak + burst]
     if window.size < 8:
         return None
     hf = _hf_ratio(window, rate)
 
-    if attack > _MAX_ATTACK_S or hf < _MIN_HF_RATIO:
+    if (attack > _MAX_ATTACK_S or core > _MAX_CORE_S
+            or hf < _MIN_HF_RATIO):
         return None
 
     # Rank by loudness x broadband content x attack sharpness; each factor is

@@ -29,6 +29,7 @@ from clapsync.app.decode import load_audio
 from clapsync.app.media import MediaInfo, probe
 from clapsync.app.mocap import load_c3d
 from clapsync.core import TimeRange
+from clapsync.core.timerange import common_time_range, full_time_range
 from clapsync.core.clap import centroid, classify_clap_markers, detect_clap_motion
 from clapsync.gui import icons
 from clapsync.gui.audio_engine import AudioEngine
@@ -545,8 +546,17 @@ class SyncEditorWindow(QMainWindow):
         for index, motion_s in self._mocap_motion.items():
             self._offsets[index] = shared_s - motion_s
         self._timeline.set_offsets(self._offsets)
+        self._refit_trim()
         self._on_offsets_changed(self._offsets)
         self._recolor_clap_markers(shared_s)
+
+    def _refit_trim(self) -> None:
+        """Reset the trim to the common overlap after offsets change."""
+        durations = [info.duration for info in self._video_infos]
+        rng = common_time_range(durations, self._offsets)
+        if rng.duration <= 0:  # no shared overlap -> fall back to the union
+            rng = full_time_range(durations, self._offsets)
+        self._timeline.set_trim(rng.start, rng.end)
 
     def _recolor_clap_markers(self, anchor_s: float) -> None:
         """Mark the selected cluster as winner; move c3d markers to it."""

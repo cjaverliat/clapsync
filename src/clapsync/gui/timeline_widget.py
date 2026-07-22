@@ -572,6 +572,12 @@ class SyncTrimTimelineWidget(TimelineWidget):
     def get_trim(self) -> tuple[float, float]:
         return self._trim_start_s, self._trim_end_s
 
+    def set_trim(self, start: float, end: float) -> None:
+        """Reset the trim window (e.g. after re-anchoring changes the overlap)."""
+        self._trim_start_s = start
+        self._trim_end_s = end
+        self.update()
+
     # ------------------------------------------------------------------ paint
 
     def _paint_extras(self, painter: QPainter, w: int, h: int, t: dict) -> None:
@@ -641,6 +647,13 @@ class SyncTrimTimelineWidget(TimelineWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._drag_mode is None:
+            pos = event.position()
+            over_clap = self._clap_at(pos.x(), pos.y()) is not None
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor if over_clap
+                else Qt.CursorShape.ArrowCursor
+            )
         if self._drag_mode not in ("trim_start", "trim_end"):
             super().mouseMoveEvent(event)
             return
