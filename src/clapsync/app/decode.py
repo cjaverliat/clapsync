@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -34,6 +35,18 @@ _PREVIEW_FPS = 30
 # Bumped whenever the transcode parameters change, so proxies cached under the
 # old settings are regenerated instead of served stale.
 _PROXY_VERSION = 4
+
+
+def _stderr_tail(err_file, limit: int = 4000) -> str:
+    """Read a captured ffmpeg stderr temp file, returning its trailing chars.
+
+    stderr is captured to a temp file rather than a pipe so a chatty ffmpeg
+    can't fill a pipe buffer and deadlock against the stdout we stream. The tail
+    is what carries the actual failure (missing codec, corrupt input, OOM).
+    """
+    err_file.seek(0)
+    text = err_file.read().decode("utf-8", "replace").strip()
+    return text[-limit:]
 
 
 def load_audio(
@@ -114,32 +127,37 @@ def _decode_with_ffmpeg(
     if ffmpeg is None:
         raise RuntimeError("ffmpeg not found on PATH; cannot decode audio")
 
+    # -v error (not quiet) so the captured stderr carries the failure reason.
     cmd = [
-        ffmpeg, "-nostdin", "-v", "quiet",
+        ffmpeg, "-nostdin", "-v", "error",
         "-i", str(path),
         "-vn", "-ac", "1", "-ar", str(rate),
         "-f", "f32le", "pipe:1",
     ]
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-
     expected = int(duration * rate * 4) if duration else 0
     buf = bytearray()
     last = -1.0
-    assert proc.stdout is not None
-    while True:
-        chunk = proc.stdout.read(_READ_CHUNK)
-        if not chunk:
-            break
-        buf += chunk
-        if progress is not None and expected:
-            fraction = min(len(buf) / expected, 1.0)
-            if fraction - last >= _PROGRESS_STEP:
-                progress(fraction)
-                last = fraction
-    if proc.wait() != 0:
-        raise RuntimeError(f"ffmpeg failed to decode audio from {path}")
+    with tempfile.TemporaryFile() as err_file:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=err_file
+        )
+        assert proc.stdout is not None
+        while True:
+            chunk = proc.stdout.read(_READ_CHUNK)
+            if not chunk:
+                break
+            buf += chunk
+            if progress is not None and expected:
+                fraction = min(len(buf) / expected, 1.0)
+                if fraction - last >= _PROGRESS_STEP:
+                    progress(fraction)
+                    last = fraction
+        if proc.wait() != 0:
+            logger.error(
+                "ffmpeg audio decode failed for %s:\n%s",
+                path, _stderr_tail(err_file),
+            )
+            raise RuntimeError(f"ffmpeg failed to decode audio from {path}")
 
     if progress is not None:
         progress(1.0)
@@ -244,6 +262,7 @@ def ensure_preview_proxy(
     path = Path(path)
     info = media.probe(path)
     if not source_needs_preview_proxy(info):
+        logger.debug("proxy: %s within envelope, using source directly", path.name)
         if progress is not None:
             progress(1.0)
         return path
@@ -251,10 +270,17 @@ def ensure_preview_proxy(
     key = _content_key(path, _PREVIEW_HEIGHT, _PREVIEW_FPS, _PROXY_VERSION)
     proxy = _cache_dir("video-cache") / f"{key}.mp4"
     if proxy.exists():
+        logger.info("proxy: cache hit for %s -> %s", path.name, proxy.name)
         if progress is not None:
             progress(1.0)
         return proxy
 
+    logger.info(
+        "proxy: transcoding %s (%sx%s @%sfps) -> %dp/%dfps",
+        path.name, info.width, info.height,
+        f"{info.fps:.1f}" if info.fps else "?",
+        _PREVIEW_HEIGHT, _PREVIEW_FPS,
+    )
     _transcode_preview_proxy(path, proxy, info.duration, progress)
     return proxy
 
@@ -304,10 +330,13 @@ def _transcode_preview_proxy(
         *enc,
     ]
 
-    if not _run_transcode(gpu, duration, progress):
-        if not _run_transcode(cpu, duration, progress):
-            tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"ffmpeg failed to transcode preview proxy from {path}")
+    if _run_transcode(gpu, duration, progress):
+        logger.info("proxy: %s transcoded on GPU pipeline", path.name)
+    elif _run_transcode(cpu, duration, progress):
+        logger.info("proxy: %s transcoded on CPU pipeline (GPU unavailable)", path.name)
+    else:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg failed to transcode preview proxy from {path}")
     os.replace(tmp, proxy)
     if progress is not None:
         progress(1.0)
@@ -321,25 +350,35 @@ def _run_transcode(
     """Run one ffmpeg transcode, driving ``progress`` from its ``-progress`` feed.
 
     Returns True on a clean (exit 0) transcode, False otherwise, so the caller
-    can fall back to a software pipeline.
+    can fall back to a software pipeline. A failing pipeline's ffmpeg stderr is
+    logged (the GPU path failing is expected on non-NVIDIA hosts, so it is a
+    warning, not an error).
     """
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
-    )
     last = -1.0
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        if progress is None or duration <= 0:
-            continue
-        key, _, value = line.strip().partition("=")
-        if key != "out_time_us":
-            continue
-        try:
-            seconds = int(value) / 1_000_000
-        except ValueError:
-            continue  # ffmpeg emits "N/A" before the first frame lands
-        fraction = min(seconds / duration, 1.0)
-        if fraction - last >= _PROGRESS_STEP:
-            progress(fraction)
-            last = fraction
-    return proc.wait() == 0
+    with tempfile.TemporaryFile() as err_file:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=err_file, text=True
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if progress is None or duration <= 0:
+                continue
+            key, _, value = line.strip().partition("=")
+            if key != "out_time_us":
+                continue
+            try:
+                seconds = int(value) / 1_000_000
+            except ValueError:
+                continue  # ffmpeg emits "N/A" before the first frame lands
+            fraction = min(seconds / duration, 1.0)
+            if fraction - last >= _PROGRESS_STEP:
+                progress(fraction)
+                last = fraction
+        if proc.wait() != 0:
+            pipeline = "GPU" if "-hwaccel" in cmd else "CPU"
+            logger.warning(
+                "ffmpeg %s transcode pipeline failed:\n%s",
+                pipeline, _stderr_tail(err_file),
+            )
+            return False
+    return True

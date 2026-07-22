@@ -335,8 +335,21 @@ def export_media(
     results: list[ExportResult] = []
     n = len(media)
 
+    logger.info(
+        "export: %d track(s) -> %s | device=%s trim=%.3f..%.3fs (%.3fs)",
+        n, settings.output_dir, device, trim.start, trim.end, trim.duration,
+    )
+    logger.info(
+        "export settings: size=%sx%s fps=%s vcodec=%s crf=%d "
+        "audio_fmt=%s audio_rate=%s audio_bitrate=%s",
+        settings.target_width, settings.target_height, settings.output_fps,
+        settings.video_codec or "auto", settings.crf, settings.audio_format,
+        settings.audio_sample_rate, settings.audio_bitrate,
+    )
+
     for i, (info, offset) in enumerate(zip(media, offsets)):
         if is_cancelled is not None and is_cancelled():
+            logger.info("export: cancelled after %d/%d track(s)", i, n)
             break
         try:
             if info.kind == "video":
@@ -355,6 +368,7 @@ def export_media(
                     out_path, None, None, audio, rate,
                     audio_bitrate=settings.audio_bitrate, device="cpu",
                 )
+            logger.info("export: track %d/%d ok -> %s", i + 1, n, out_path.name)
             results.append(ExportResult(out_path))
         except Exception as exc:  # noqa: BLE001 — record per-track failure
             logger.exception("export failed for %s", info.path)
@@ -365,6 +379,11 @@ def export_media(
         if progress is not None:
             progress((i + 1) / n)
 
+    failed = [r for r in results if not r.ok]
+    logger.info(
+        "export: complete, %d ok / %d failed", len(results) - len(failed),
+        len(failed),
+    )
     return results
 
 

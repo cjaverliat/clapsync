@@ -79,9 +79,11 @@ class ProxyWorker(QObject):
         try:
             n = len(self._paths)
             start = time.monotonic()
+            logger.info("proxy pre-pass: generating proxies for %d source(s)", n)
             proxies = []
             for index, path in enumerate(self._paths):
                 if self._cancel:
+                    logger.info("proxy pre-pass: cancelled after %d/%d", index, n)
                     break
 
                 def report(fraction: float, index: int = index) -> None:
@@ -99,6 +101,10 @@ class ProxyWorker(QObject):
                         self.status.emit(f"Generating preview proxy {index + 1}/{n}")
 
                 proxies.append(ensure_preview_proxy(path, progress=report))
+            logger.info(
+                "proxy pre-pass: done, %d proxy path(s) in %.1fs",
+                len(proxies), time.monotonic() - start,
+            )
             self.finished.emit(proxies)
         except Exception as exc:  # noqa: BLE001
             logger.exception("proxy worker failed")
@@ -242,11 +248,19 @@ class ExportWorker(QObject):
             else:
                 self.status.emit(f"Exporting — {done}/{n} tracks done")
 
-        results = export_media(
-            self._media,
-            self._offsets,
-            self._settings,
-            progress=_on_progress,
-            is_cancelled=lambda: self._cancelled,
-        )
+        try:
+            results = export_media(
+                self._media,
+                self._offsets,
+                self._settings,
+                progress=_on_progress,
+                is_cancelled=lambda: self._cancelled,
+            )
+        except Exception as exc:  # noqa: BLE001 — never leave the dialog hung
+            # export_media catches per-track failures itself; reaching here means
+            # a setup-level crash (device probe, bad settings). Surface it as a
+            # single failed result so the dialog closes with the error shown.
+            logger.exception("export worker failed")
+            from clapsync.app.export import ExportResult
+            results = [ExportResult(self._settings.output_dir, str(exc))]
         self.finished.emit(results)

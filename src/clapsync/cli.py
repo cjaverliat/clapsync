@@ -6,6 +6,7 @@ import math
 import sys
 from pathlib import Path
 
+from clapsync import diagnostics
 from clapsync.app import compute_sync_offsets, sync_and_trim
 from clapsync.app.media import probe
 from clapsync.core import LOW_CONFIDENCE, common_time_range, full_time_range
@@ -73,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
         0 on success, 1 if any export failed, 2 if no subcommand given.
     """
     parser = argparse.ArgumentParser(prog="clapsync-cli")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable debug logging"
+    )
     sub = parser.add_subparsers(dest="command")
 
     p_sync = sub.add_parser("sync", help="Print offsets and time ranges")
@@ -89,6 +93,12 @@ def main(argv: list[str] | None = None) -> int:
     if not getattr(args, "command", None):
         parser.print_usage(sys.stderr)
         return 2
+
+    diagnostics.configure_logging(verbose=args.verbose)
+    diagnostics.install_excepthook()
+    diagnostics.log_startup_context()
+    diagnostics.log_inputs(args.inputs)
+
     return args.func(args)
 
 
