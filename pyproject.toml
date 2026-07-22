@@ -1,6 +1,6 @@
 [project]
 name = "clapsync"
-version = "0.4.0"
+version = "0.5.0"
 description = "Multi-camera audio-based synchronization and trimming tool"
 requires-python = ">=3.10,<3.13"
 # Abstract runtime deps for consumers. Media I/O is framepipe (video decode)
@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 app = ["av>=18", "framepipe @ git+https://github.com/cjaverliat/framepipe"]
-gui = ["clapsync[app]", "PySide6>=6.7,<6.8"]
+gui = ["clapsync[app]", "PySide6>=6.7,<6.8", "qtawesome>=1.3"]
 triton = [
     "triton; sys_platform == 'linux'",
     "triton-windows; sys_platform == 'win32'",
@@ -55,6 +55,7 @@ torchaudio = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.o
 numpy = "*"
 av = "*"
 PySide6 = ">=6.7.0,<6.8"
+qtawesome = ">=1.3"
 pytest = "*"
 
 # Triton distribution is per-platform: upstream on Linux, the woct0rdho fork on
@@ -108,6 +109,7 @@ nuitka \
   --output-dir=outputs \
   --output-filename=clapsync \
   --include-package=clapsync \
+  --include-package-data=qtawesome \
   --show-progress \
   src/clapsync/gui/app.py
 """

@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from PySide6.QtCore import Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -24,11 +25,16 @@ from PySide6.QtWidgets import (
 )
 
 from clapsync.app import ExportResult, ExportSettings
+from clapsync.app.decode import load_audio
 from clapsync.app.media import MediaInfo, probe
 from clapsync.core import TimeRange
+from clapsync.gui import icons
+from clapsync.gui.audio_engine import AudioEngine
 from clapsync.gui.export_dialog import ExportDialog, fmt_time
 from clapsync.gui.video_player import VideoPlayerWidget, VideoGroupWorker
 from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
+from clapsync.gui.track_panel import TrackHeaderPanel
+from clapsync.gui.waveform_widget import WaveformWidget
 from clapsync.gui.workers import ExportWorker
 
 logger = logging.getLogger(__name__)
@@ -53,6 +59,7 @@ class SyncEditorWindow(QMainWindow):
         offsets: list[float],
         output_dir: Path | None = None,
         use_proxies: bool = False,
+        low_confidence: list[bool] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -60,6 +67,7 @@ class SyncEditorWindow(QMainWindow):
         self.resize(1200, 700)
 
         self._use_proxies: bool = use_proxies
+        self._low_confidence: list[bool] = list(low_confidence or [])
         self._video_infos: list[MediaInfo] = []
         self._offsets: list[float] = list(offsets)
         self._trim_start: float = 0.0
@@ -72,6 +80,8 @@ class SyncEditorWindow(QMainWindow):
         self._group_thread: QThread | None = None
         self._is_playing: bool = False
         self._seek_gen: int = 0
+        self._video_eof_pending: bool = False
+        self._muted: list[bool] = []
 
         for path in video_paths:
             logger.debug("probe: %s", path.name)
@@ -80,10 +90,15 @@ class SyncEditorWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.warning(self, "Warning", f"Could not read {path.name}: {exc}")
                 continue
-            logger.debug(
-                "probe done: %s  duration=%.2fs  %dx%d",
-                path.name, info.duration, info.width, info.height,
-            )
+            if info.kind == "video":
+                logger.debug(
+                    "probe done: %s  duration=%.2fs  %dx%d",
+                    path.name, info.duration, info.width, info.height,
+                )
+            else:
+                logger.debug(
+                    "probe done: %s  duration=%.2fs  audio", path.name, info.duration,
+                )
             self._video_infos.append(info)
 
         if not self._video_infos:
@@ -92,10 +107,12 @@ class SyncEditorWindow(QMainWindow):
 
         total = max(info.duration + off for info, off in zip(self._video_infos, self._offsets))
         self._trim_end = total
+        self._muted: list[bool] = [False] * len(self._video_infos)
 
         self._build_ui()
         self._wire_signals()
         self._init_timeline()
+        self._init_audio()
         self._load_all_videos()
 
     def _build_ui(self) -> None:
@@ -134,6 +151,8 @@ class SyncEditorWindow(QMainWindow):
         grid.setSpacing(4)
 
         self._players: list[VideoPlayerWidget] = []
+        self._video_slots: list[int] = []
+        self._waveforms: dict[int, WaveformWidget] = {}
         for i, info in enumerate(self._video_infos):
             cell = QWidget()
             cell_layout = QVBoxLayout(cell)
@@ -145,12 +164,25 @@ class SyncEditorWindow(QMainWindow):
             name_lbl.setStyleSheet("font-size: 10px; color: #555;")
             cell_layout.addWidget(name_lbl)
 
-            player = VideoPlayerWidget()
-            player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            player.setMinimumSize(160, 90)
-            cell_layout.addWidget(player, stretch=1)
+            if info.kind == "video":
+                player = VideoPlayerWidget()
+                player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                player.setMinimumSize(160, 90)
+                cell_layout.addWidget(player, stretch=1)
+                self._players.append(player)
+                self._video_slots.append(i)
+            else:
+                wf = WaveformWidget()
+                cell_layout.addWidget(wf, stretch=1)
+                try:
+                    waveform, _rate = load_audio(info.path, target_rate=16000)
+                    wf.set_waveform(waveform.reshape(-1).cpu().numpy())
+                except Exception as exc:
+                    logger.warning(
+                        "failed to load waveform for %s: %s", info.path.name, exc
+                    )
+                self._waveforms[i] = wf
 
-            self._players.append(player)
             grid.addWidget(cell, i // cols, i % cols)
 
         # Attach overlay as child of mosaic (after grid children so raise_() works)
@@ -167,7 +199,7 @@ class SyncEditorWindow(QMainWindow):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(6)
 
-        self._play_btn = QPushButton("▶  Play")
+        self._play_btn = QPushButton(icons.icon("play"), "  Play")
         self._play_btn.setFixedWidth(90)
         controls.addWidget(self._play_btn)
 
@@ -181,15 +213,22 @@ class SyncEditorWindow(QMainWindow):
         controls.addWidget(self._loop_checkbox)
         root.addWidget(controls_widget)
 
-        # ── Timeline ──────────────────────────────────────────────────────────
+        # ── Timeline (fixed track panel + scrolling timeline) ─────────────────
         self._timeline = SyncTrimTimelineWidget()
         self._timeline.setFixedHeight(200)
-        root.addWidget(self._timeline)
+        self._track_panel = TrackHeaderPanel()
+        self._track_panel.setFixedHeight(200)
+        timeline_row = QHBoxLayout()
+        timeline_row.setContentsMargins(0, 0, 0, 0)
+        timeline_row.setSpacing(0)
+        timeline_row.addWidget(self._track_panel)
+        timeline_row.addWidget(self._timeline, stretch=1)
+        root.addLayout(timeline_row)
 
         # ── Bottom bar ────────────────────────────────────────────────────────
         bottom = QHBoxLayout()
         bottom.addStretch()
-        self._export_btn = QPushButton("Export…")
+        self._export_btn = QPushButton(icons.icon("export"), "Export…")
         self._export_btn.setFixedWidth(100)
         bottom.addWidget(self._export_btn)
         root.addLayout(bottom)
@@ -200,6 +239,8 @@ class SyncEditorWindow(QMainWindow):
         self._timeline.playhead_changed.connect(self._on_playhead_seek)
         self._timeline.offsets_changed.connect(self._on_offsets_changed)
         self._timeline.trim_changed.connect(self._on_trim_changed)
+        self._timeline.vscroll_changed.connect(self._track_panel.set_scroll_y)
+        self._track_panel.mute_changed.connect(self._on_mute)
         self._export_btn.clicked.connect(self._on_export)
         # Note: position tracking is done directly in _on_frames_ready, not via
         # individual player signals, to avoid double-updates.
@@ -224,16 +265,50 @@ class SyncEditorWindow(QMainWindow):
                 offset_s=self._offsets[i],
                 duration_s=info.duration,
                 locked=i == 0,
+                muted=self._muted[i] if i < len(self._muted) else False,
+                kind=info.kind,
+                warn=i < len(self._low_confidence) and self._low_confidence[i],
             )
             for i, info in enumerate(self._video_infos)
         ]
         self._timeline.set_tracks(tracks)
+        self._track_panel.set_tracks(tracks)
         self._trim_start, self._trim_end = self._timeline.get_trim()
+        self._update_waveform_windows()
+
+    def _update_waveform_windows(self) -> None:
+        for idx, wf in self._waveforms.items():
+            info = self._video_infos[idx]
+            wf.set_window(
+                self._offsets[idx], info.duration, self._trim_start, self._trim_end
+            )
+
+    def _init_audio(self) -> None:
+        self._audio = AudioEngine(self)
+        waveforms = []
+        for info in self._video_infos:
+            try:
+                w, _rate = load_audio(info.path, target_rate=48000)
+            except Exception as exc:
+                logger.warning(
+                    "failed to load audio track for %s: %s", info.path.name, exc
+                )
+                w = torch.zeros(1, 1)
+            waveforms.append(w)
+        self._audio.set_tracks(waveforms, self._offsets)
+        self._audio.set_muted(self._muted)
+        self._audio.position_changed.connect(self._on_audio_tick)
 
     def _load_all_videos(self) -> None:
-        paths = [info.path for info in self._video_infos]
+        paths = [self._video_infos[i].path for i in self._video_slots]
+        video_offsets = [self._offsets[i] for i in self._video_slots]
 
         self._stop_group_worker()
+
+        if not paths:
+            # No video tracks: playback is driven entirely by the audio engine.
+            self._sync_seek_all(self._trim_start)
+            return
 
         worker = VideoGroupWorker(use_proxies=self._use_proxies)
         thread = QThread(self)
@@ -257,7 +332,7 @@ class SyncEditorWindow(QMainWindow):
         logger.info(
             "_load_all_videos: opening %d video(s) via VideoGroupWorker", len(paths)
         )
-        worker.cmd("open", paths, self._offsets[:])
+        worker.cmd("open", paths, video_offsets)
         self._sync_seek_all(self._trim_start)
 
     def _stop_group_worker(self) -> None:
@@ -283,12 +358,20 @@ class SyncEditorWindow(QMainWindow):
         global_ts: float,
         seek_gen: int,
     ) -> None:
+        self._video_eof_pending = False
         for player, frame in zip(self._players, frames):
             player.display_frame(frame)
         # Reject frames that were emitted before the most recent seek was
         # processed by the worker — their timestamps pre-date the new position.
         if global_ts >= 0.0 and seek_gen >= self._seek_gen:
             self._on_position_changed(global_ts)
+            # Re-lock audio to the video clock only on *genuine* drift. The
+            # 0.5s threshold clears QAudioSink's normal buffer-latency lead
+            # (position_s() counts samples pulled, ~100-200ms ahead of what's
+            # audible), so this fires rarely — and seek() is now a cheap cursor
+            # move, not a device restart.
+            if self._audio.enabled and abs(global_ts - self._audio.position_s()) > 0.5:
+                self._audio.seek(global_ts)
 
     @Slot(bool)
     def _on_loading_changed(self, loading: bool) -> None:
@@ -306,22 +389,45 @@ class SyncEditorWindow(QMainWindow):
 
     def _restart_from_trim_start(self) -> None:
         """Loop: seek every track back to the trim start and resume."""
+        self._video_eof_pending = False
         self._sync_seek_all(self._trim_start)
         self._global_pos = self._trim_start
         if self._group_worker is not None:
             self._group_worker.cmd("play")
+        if self._audio.enabled:
+            self._audio.play()
+
+    def _show_play(self) -> None:
+        self._play_btn.setIcon(icons.icon("play"))
+        self._play_btn.setText("  Play")
+
+    def _show_pause(self) -> None:
+        self._play_btn.setIcon(icons.icon("pause"))
+        self._play_btn.setText("  Pause")
 
     def _stop_playback(self) -> None:
         """Stop: pause the worker (a no-op at EOF) and reset the play button."""
         self._is_playing = False
+        self._video_eof_pending = False
         if self._group_worker is not None:
             self._group_worker.cmd("pause")
-        self._play_btn.setText("▶  Play")
+        self._audio.pause()
+        self._show_play()
 
     @Slot()
     def _on_eof(self) -> None:
         if self._is_playing and self._loop_checkbox.isChecked():
             self._restart_from_trim_start()
+            return
+        if (
+            self._is_playing
+            and self._global_pos < self._trim_end - 0.05
+            and self._audio.enabled
+        ):
+            # Video ran out of frames before the trim end, but the audio mix
+            # still has content — let it carry playback to trim_end instead
+            # of stopping early.
+            self._video_eof_pending = True
             return
         self._stop_playback()
         logger.debug("SyncEditorWindow: EOF — playback stopped")
@@ -330,10 +436,12 @@ class SyncEditorWindow(QMainWindow):
     def _on_play_pause(self) -> None:
         if self._is_playing:
             self._is_playing = False
+            self._video_eof_pending = False
             if self._group_worker is not None:
                 self._group_worker.cmd("pause")
+            self._audio.pause()
             self._sync_seek_all(self._global_pos)
-            self._play_btn.setText("▶  Play")
+            self._show_play()
         else:
             if self._global_pos >= self._trim_end - 0.05 or self._global_pos < self._trim_start:
                 self._sync_seek_all(self._trim_start)
@@ -341,10 +449,13 @@ class SyncEditorWindow(QMainWindow):
             self._is_playing = True
             if self._group_worker is not None:
                 self._group_worker.cmd("play")
-            self._play_btn.setText("⏸  Pause")
+            if self._audio.enabled:
+                self._audio.play()
+            self._show_pause()
 
     def _sync_seek_all(self, global_s: float) -> None:
         self._seek_gen += 1
+        self._audio.seek(global_s)
         if self._group_worker is None:
             return
         logger.debug("SyncEditorWindow: seek_all  global_ts=%.4fs", global_s)
@@ -364,10 +475,13 @@ class SyncEditorWindow(QMainWindow):
     @Slot(list)
     def _on_offsets_changed(self, offsets: list[float]) -> None:
         self._offsets = offsets
+        self._audio.set_offsets(offsets)
         if self._group_worker is not None:
-            self._group_worker.cmd("update_offsets", offsets[:])
+            video_offsets = [offsets[i] for i in self._video_slots]
+            self._group_worker.cmd("update_offsets", video_offsets)
         # Trim bounds may have been adjusted by _clamp_trim_to_tracks in the timeline.
         self._trim_start, self._trim_end = self._timeline.get_trim()
+        self._update_waveform_windows()
         clamped = max(self._trim_start, min(self._trim_end, self._global_pos))
         self._global_pos = clamped
         self._sync_seek_all(clamped)
@@ -378,6 +492,7 @@ class SyncEditorWindow(QMainWindow):
     def _on_trim_changed(self, trim_start: float, trim_end: float) -> None:
         self._trim_start = trim_start
         self._trim_end = trim_end
+        self._update_waveform_windows()
         clamped = max(trim_start, min(trim_end, self._global_pos))
         if clamped != self._global_pos:
             self._global_pos = clamped
@@ -387,11 +502,27 @@ class SyncEditorWindow(QMainWindow):
         if self._is_playing and self._group_worker is not None:
             self._group_worker.cmd("play")
 
+    @Slot(int, bool)
+    def _on_mute(self, index: int, muted: bool) -> None:
+        if 0 <= index < len(self._muted):
+            self._muted[index] = muted
+        self._audio.set_muted(self._muted)
+
+    def _on_audio_tick(self, position_s: float) -> None:
+        # The audio engine is the fallback clock: it drives playback state
+        # whenever there is no video (or the video has run dry but audio is
+        # still carrying playback to the trim end). Otherwise video frames
+        # (which arrive far more frequently) are the master clock.
+        if not self._players or self._video_eof_pending:
+            self._on_position_changed(position_s)
+
     @Slot(float)
     def _on_position_changed(self, global_s: float) -> None:
         self._global_pos = global_s
         self._timeline.set_playhead(global_s)
         self._update_time_label(global_s)
+        for wf in self._waveforms.values():
+            wf.set_playhead(global_s)
         if self._is_playing and global_s >= self._trim_end - 0.05:
             if self._loop_checkbox.isChecked():
                 self._restart_from_trim_start()
@@ -415,11 +546,15 @@ class SyncEditorWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        target_width, target_height, output_fps, output_dir = dialog.get_export_params()
+        params = dialog.get_export_params()
+        output_dir = params.output_dir
 
         if not output_dir.exists():
             QMessageBox.warning(self, "Export", f"Directory does not exist: {output_dir}")
             return
+
+        selected_media = [self._video_infos[i] for i in params.selected_indices]
+        selected_offsets = [self._offsets[i] for i in params.selected_indices]
 
         progress_dialog = QProgressDialog(
             "Exporting…", "Cancel", 0, 1000, self
@@ -434,11 +569,14 @@ class SyncEditorWindow(QMainWindow):
         settings = ExportSettings(
             trim=TimeRange(self._trim_start, self._trim_end),
             output_dir=output_dir,
-            target_width=target_width,
-            target_height=target_height,
-            output_fps=output_fps,
+            target_width=params.target_width,
+            target_height=params.target_height,
+            output_fps=params.output_fps,
+            audio_format=params.audio_format,
+            audio_sample_rate=params.audio_sample_rate,
+            audio_bitrate=params.audio_bitrate,
         )
-        worker = ExportWorker(self._video_infos, self._offsets, settings)
+        worker = ExportWorker(selected_media, selected_offsets, settings)
         thread = QThread(self)
         worker.moveToThread(thread)
 
@@ -497,5 +635,8 @@ class SyncEditorWindow(QMainWindow):
         self._export_worker = worker
 
     def closeEvent(self, event) -> None:
+        audio = getattr(self, "_audio", None)
+        if audio is not None:
+            audio.pause()
         self._stop_group_worker()
         super().closeEvent(event)

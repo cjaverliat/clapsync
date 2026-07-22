@@ -29,7 +29,10 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
 
     paths = args.inputs
-    offsets = compute_sync_offsets(paths)
+    alignment = compute_sync_offsets(paths)
+    offsets = alignment.offsets
+    for warning in alignment.warnings:
+        print(f"! {warning}")
     durations = [probe(p).duration for p in paths]
     trim = common_time_range(durations, offsets)
 

@@ -8,9 +8,11 @@ def test_public_surface_importable():
     )
     from clapsync.app.media import MediaInfo, probe
     from clapsync.core import (
+        Alignment,
         TimeRange,
         common_time_range,
         find_offset,
+        find_offset_peaks,
         full_time_range,
     )
     assert callable(sync_and_trim)

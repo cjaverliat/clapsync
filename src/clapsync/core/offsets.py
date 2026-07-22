@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Callable, Literal
 
 import numpy as np
@@ -5,7 +6,27 @@ import torch
 import torchaudio.functional as AF
 from torchaudio.transforms import MFCC
 
+from clapsync.core.solver import Alignment, Peaks, solve_offsets
+
 Refine = Literal["none", "parabolic"]
+
+# Peak-candidate extraction. K and the exclusion window bound how many
+# distinct correlation lobes are reported per pair; the robust score scale
+# matches the BBC audio-offset-finder "standard score" (1.4826*MAD == sigma
+# for Gaussian data), so its published 5/10 thresholds apply.
+_MAX_PEAKS = 5
+_EXCLUSION_S = 0.5
+
+
+@dataclass(frozen=True)
+class PairAlignment:
+    """Ranked correlation-peak candidates for one track pair.
+
+    peaks: (offset_seconds, score) tuples, best first. peaks[0][0] is the
+    primary offset estimate; peaks[0][1] its robust standard score.
+    """
+
+    peaks: list[tuple[float, float]]
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +67,53 @@ def _parabolic_peak(corr: np.ndarray, peak: int) -> float:
     if abs(denom) < 1e-12:
         return float(peak)
     return peak + 0.5 * (y0 - y2) / denom
+
+
+def _peak_candidates(
+    corr: np.ndarray,
+    sub_len: int,
+    hop_length: int,
+    rate: int,
+    refine: Refine,
+) -> list[tuple[float, float]]:
+    """Extract up to _MAX_PEAKS distinct peaks with robust standard scores.
+
+    Score = (peak - median) / (1.4826 * MAD): the BBC-style standard score
+    made robust to sidelobes (music beats, reverb) by using median/MAD
+    instead of mean/std. Candidates are greedily taken in height order with
+    an exclusion window so shoulders of one lobe are not reported twice.
+
+    Args:
+        corr: 1D cross-correlation array (see _mfcc_cross_correlate).
+        sub_len: Number of MFCC frames in the query clip (T_sub).
+        hop_length: Hop length in samples used to compute the MFCCs.
+        rate: Sample rate in Hz the hop_length is expressed against.
+        refine: "parabolic" (sub-hop interpolation) or "none" (integer hop).
+
+    Returns:
+        Up to _MAX_PEAKS (offset_seconds, score) tuples, best first.
+    """
+    med = float(np.median(corr))
+    mad = float(np.median(np.abs(corr - med)))
+    scale = 1.4826 * mad + 1e-12
+    exclusion = max(1, round(_EXCLUSION_S * rate / hop_length))
+
+    order = np.argsort(corr)[::-1]
+    chosen: list[int] = []
+    for idx in order:
+        if len(chosen) >= _MAX_PEAKS:
+            break
+        if all(abs(int(idx) - c) >= exclusion for c in chosen):
+            chosen.append(int(idx))
+
+    peaks: list[tuple[float, float]] = []
+    for idx in chosen:
+        pos = _parabolic_peak(corr, idx) if refine == "parabolic" else float(idx)
+        lag_hops = pos - (sub_len - 1)
+        offset = lag_hops * hop_length / rate
+        score = (float(corr[idx]) - med) / scale
+        peaks.append((offset, score))
+    return peaks
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +185,16 @@ def _mfcc_cross_correlate(ref: torch.Tensor, sub: torch.Tensor) -> np.ndarray:
         Zero-lag is at index T_sub - 1; a peak at index k gives
         lag = k - (T_sub - 1) hops.
     """
-    # Per-coefficient variance normalization
-    ref_std = ref.std(dim=1, keepdim=True).clamp(min=1e-8)
-    sub_std = sub.std(dim=1, keepdim=True).clamp(min=1e-8)
-    ref_n   = ref / ref_std                  # (n_mfcc, T_ref)
-    sub_rev = sub.flip(dims=[1]) / sub_std   # (n_mfcc, T_sub), time-reversed
+    # Per-coefficient mean-centering then variance normalization. Subtracting
+    # the mean makes this a true cross-covariance (Google ICASSP'14 eq. 4):
+    # without it, MFCC c0 (log-energy) carries a large DC term whose triangular
+    # autocorrelation ridge pins the peak at zero lag for low-transient content.
+    ref_c = ref - ref.mean(dim=1, keepdim=True)
+    sub_c = sub - sub.mean(dim=1, keepdim=True)
+    ref_std = ref_c.std(dim=1, keepdim=True).clamp(min=1e-8)
+    sub_std = sub_c.std(dim=1, keepdim=True).clamp(min=1e-8)
+    ref_n   = ref_c / ref_std                  # (n_mfcc, T_ref)
+    sub_rev = sub_c.flip(dims=[1]) / sub_std   # (n_mfcc, T_sub), time-reversed
 
     # FFT size: next power of 2 >= linear convolution output length
     valid_len = ref.shape[1] + sub.shape[1] - 1
@@ -139,7 +212,7 @@ def _mfcc_cross_correlate(ref: torch.Tensor, sub: torch.Tensor) -> np.ndarray:
     return corr.numpy().astype(np.float64)
 
 
-def find_offset(
+def find_offset_peaks(
     ref_waveform: torch.Tensor,
     ref_rate: int,
     waveform: torch.Tensor,
@@ -152,7 +225,7 @@ def find_offset(
     win_duration: float = 0.04,
     n_mels: int = 128,
     mel_scale: Literal["htk", "slaney"] = "htk",
-) -> float:
+) -> PairAlignment:
     """Temporal offset between two waveforms via MFCC cross-correlation.
 
     Args:
@@ -164,8 +237,9 @@ def find_offset(
         n_mfcc, n_fft, hop_duration, win_duration, n_mels, mel_scale: MFCC params.
 
     Returns:
-        Lag in seconds. Positive means the query leads (starts before) the
-        reference; negative means it starts later.
+        PairAlignment ranking up to _MAX_PEAKS candidate lags, best first.
+        Positive means the query leads (starts before) the reference;
+        negative means it starts later.
     """
     if ref_rate != rate:
         waveform = AF.resample(waveform, orig_freq=rate, new_freq=ref_rate)
@@ -186,12 +260,32 @@ def find_offset(
     )
 
     corr = _mfcc_cross_correlate(mfcc_ref, mfcc_sub)
-    peak_idx = int(np.argmax(corr))
-    peak = _parabolic_peak(corr, peak_idx) if refine == "parabolic" else float(peak_idx)
+    return PairAlignment(
+        _peak_candidates(corr, mfcc_sub.shape[1], hop_length, ref_rate, refine)
+    )
 
-    # Sign convention: positive lag = query leads the reference.
-    lag_hops = peak - (mfcc_sub.shape[1] - 1)
-    return lag_hops * hop_length / ref_rate
+
+def find_offset(
+    ref_waveform: torch.Tensor,
+    ref_rate: int,
+    waveform: torch.Tensor,
+    rate: int,
+    *,
+    refine: Refine = "parabolic",
+    n_mfcc: int = 13,
+    n_fft: int = 2048,
+    hop_duration: float = 0.005,
+    win_duration: float = 0.04,
+    n_mels: int = 128,
+    mel_scale: Literal["htk", "slaney"] = "htk",
+) -> float:
+    """Primary temporal offset between two waveforms (see find_offset_peaks)."""
+    return find_offset_peaks(
+        ref_waveform, ref_rate, waveform, rate,
+        refine=refine, n_mfcc=n_mfcc, n_fft=n_fft,
+        hop_duration=hop_duration, win_duration=win_duration,
+        n_mels=n_mels, mel_scale=mel_scale,
+    ).peaks[0][0]
 
 
 def align_waveforms(
@@ -201,30 +295,59 @@ def align_waveforms(
     refine: Refine = "parabolic",
     reference_index: int = 0,
     progress: Callable[[float], None] | None = None,
-) -> list[float]:
-    """Align each waveform to a reference by MFCC cross-correlation.
+) -> Alignment:
+    """Align tracks via an all-pairs MFCC correlation graph and MST solve.
+
+    Every pair is correlated (MFCCs are computed once per track); edges are
+    score-gated, triangle-consistency weighted, repaired from alternate
+    peaks, and solved with an MST rooted at the reference (see
+    clapsync.core.solver).
 
     Args:
         waveforms: Per-track audio tensors.
         rates: Per-track sample rate in Hz (parallel to waveforms).
         refine: Peak refinement ("parabolic" or "none").
         reference_index: Track whose timeline is the origin (offset 0.0).
-        progress: Optional 0..1 callback.
+        progress: Optional 0..1 callback (spans the pairwise correlations).
 
     Returns:
-        Per-track offset in seconds; offset[reference_index] == 0.0. Positive
-        means the track leads the reference (shared = local + offset).
+        Alignment; offsets[reference_index] == 0.0, confidence per track
+        (+inf for the reference, 0.0 for isolated tracks), warnings for
+        tracks needing manual verification.
     """
     n = len(waveforms)
-    ref_wave = waveforms[reference_index]
-    ref_rate = rates[reference_index]
-
-    offsets = [0.0] * n
-    for i in range(n):
-        if i != reference_index:
-            offsets[i] = find_offset(
-                ref_wave, ref_rate, waveforms[i], rates[i], refine=refine,
-            )
+    if n <= 1:
         if progress is not None:
-            progress((i + 1) / n)
-    return offsets
+            progress(1.0)
+        return Alignment(
+            [0.0] * n, [float("inf")] * n, [],
+        )
+
+    rate = rates[reference_index]
+    hop_length = int(rate * 0.005)
+    win_length = int(rate * 0.04)
+
+    monos = []
+    for wave, r in zip(waveforms, rates):
+        if r != rate:
+            wave = AF.resample(wave, orig_freq=r, new_freq=rate)
+        monos.append(_to_mono_f64(wave))
+    mfccs = [
+        _compute_mfcc(m, rate, 13, 2048, hop_length, win_length, 128, "htk")
+        for m in monos
+    ]
+
+    pairs: dict[tuple[int, int], Peaks] = {}
+    total = n * (n - 1) // 2
+    done = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            corr = _mfcc_cross_correlate(mfccs[i], mfccs[j])
+            pairs[(i, j)] = _peak_candidates(
+                corr, mfccs[j].shape[1], hop_length, rate, refine
+            )
+            done += 1
+            if progress is not None:
+                progress(done / total)
+
+    return solve_offsets(n, pairs, reference_index)

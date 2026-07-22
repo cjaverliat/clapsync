@@ -65,7 +65,7 @@ Install with `pip install clapsync` (numpy + torch + torchaudio only).
 
 | Function / class | What it does |
 |---|---|
-| `align_waveforms(waveforms, rates)` | Per-clip offset in seconds from raw audio tensors. |
+| `align_waveforms(waveforms, rates)` | Solve all-pairs offsets via consistency-weighted MST; returns an `Alignment` (offsets, per-track confidence, warnings). |
 | `find_offset(ref, target, rate)` | Single-pair offset with sub-frame parabolic refinement. |
 | `TimeRange(start, end)` | Value type for a half-open time interval. |
 | `common_time_range(durations, offsets)` | The overlap where all clips are present. |
@@ -76,7 +76,7 @@ Install with `pip install clapsync` (numpy + torch + torchaudio only).
 | Function / class | What it does |
 |---|---|
 | `load_audio(path)` | Decode a file's audio track to a tensor via PyAV. |
-| `compute_sync_offsets(paths)` | Probe + load + align; returns per-path offsets (seconds). |
+| `compute_sync_offsets(paths)` | Probe + load + align; returns an `Alignment` (`.offsets` in seconds, `.confidence`, `.warnings`). |
 | `export_tracks(paths, offsets, settings)` | Trim + export with full control (resolution, fps, codec). |
 | `sync_and_trim(paths, out)` | One-call convenience: probe → sync → trim → export. |
 | `ExportSettings` / `ExportResult` | Configuration and result types for export. |

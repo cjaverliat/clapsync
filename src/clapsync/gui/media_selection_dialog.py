@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -16,18 +16,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from clapsync.gui import icons
 
-class VideoSelectionDialog(QDialog):
+
+class MediaSelectionDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("clapsync — Select Videos")
+        self.setWindowTitle("clapsync — Select Media")
         self.setMinimumSize(560, 380)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
         layout.addWidget(
-            QLabel("Select two or more video files to synchronize:")
+            QLabel("Select two or more media files (video or audio) to synchronize:")
         )
 
         list_row = QHBoxLayout()
@@ -40,10 +42,10 @@ class VideoSelectionDialog(QDialog):
         side_btns = QVBoxLayout()
         side_btns.setSpacing(4)
 
-        self._add_btn = QPushButton("Add Videos…")
-        self._remove_btn = QPushButton("Remove")
-        self._up_btn = QPushButton("Move Up")
-        self._down_btn = QPushButton("Move Down")
+        self._add_btn = QPushButton(icons.icon("add"), "Add Media…")
+        self._remove_btn = QPushButton(icons.icon("remove"), "Remove")
+        self._up_btn = QPushButton(icons.icon("move-up"), "Move Up")
+        self._down_btn = QPushButton(icons.icon("move-down"), "Move Down")
 
         for btn in (self._add_btn, self._remove_btn, self._up_btn, self._down_btn):
             side_btns.addWidget(btn)
@@ -71,9 +73,10 @@ class VideoSelectionDialog(QDialog):
     def _add_videos(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select Video Files",
+            "Select Media Files",
             "",
-            "Video Files (*.mp4 *.mov *.avi *.mkv *.mts *.m2ts *.webm *.flv *.wmv);;All Files (*)",
+            "Media Files (*.mp4 *.mov *.avi *.mkv *.mts *.m2ts *.webm *.flv *.wmv "
+            "*.wav *.mp3 *.flac *.m4a *.aac);;All Files (*)",
         )
         existing = {self._list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self._list.count())}
         for p in paths:
@@ -93,20 +96,24 @@ class VideoSelectionDialog(QDialog):
         rows = sorted(self._list.row(i) for i in self._list.selectedItems())
         if not rows or rows[0] == 0:
             return
+        self._list.clearSelection()
         for row in rows:
             item = self._list.takeItem(row)
             self._list.insertItem(row - 1, item)
-            self._list.setCurrentItem(item, Qt.ItemSelectionMode.Select)  # type: ignore[attr-defined]
+            item.setSelected(True)
+            self._list.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
         self._update_buttons()
 
     def _move_down(self) -> None:
         rows = sorted((self._list.row(i) for i in self._list.selectedItems()), reverse=True)
         if not rows or rows[0] == self._list.count() - 1:
             return
+        self._list.clearSelection()
         for row in rows:
             item = self._list.takeItem(row)
             self._list.insertItem(row + 1, item)
-            self._list.setCurrentItem(item, Qt.ItemSelectionMode.Select)  # type: ignore[attr-defined]
+            item.setSelected(True)
+            self._list.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
         self._update_buttons()
 
     def _update_buttons(self) -> None:
@@ -118,8 +125,11 @@ class VideoSelectionDialog(QDialog):
         self._up_btn.setEnabled(bool(rows) and min(rows) > 0)
         self._down_btn.setEnabled(bool(rows) and max(rows) < n - 1)
 
-    def get_video_paths(self) -> list[Path]:
+    def get_media_paths(self) -> list[Path]:
         return [
             Path(self._list.item(i).data(Qt.ItemDataRole.UserRole))
             for i in range(self._list.count())
         ]
+
+    # Back-compat alias.
+    get_video_paths = get_media_paths

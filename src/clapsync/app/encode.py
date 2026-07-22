@@ -18,8 +18,12 @@ _AUDIO_CODEC_FOR_SUFFIX = {
     ".mov": "aac",
     ".mp3": "libmp3lame",
     ".flac": "flac",
+    ".aac": "aac",
 }
 _DEFAULT_AUDIO_CODEC = "aac"
+
+# Codecs that take a target bit rate; pcm/flac are lossless and ignore it.
+_LOSSY_AUDIO_CODECS = {"aac", "libmp3lame"}
 
 # Frames are handed to the encoder in blocks of this many samples.
 _AUDIO_BLOCK = 1024
@@ -39,6 +43,19 @@ def pick_video_codec(device: str) -> str:
 
 def _audio_codec_for(out_path: Path) -> str:
     return _AUDIO_CODEC_FOR_SUFFIX.get(out_path.suffix.lower(), _DEFAULT_AUDIO_CODEC)
+
+
+def resolve_audio_output(stem: str, fmt: str | None, src_suffix: str) -> Path:
+    """Pick the audio-only output filename for a track.
+
+    fmt is the user's chosen extension (without dot), or None for
+    "same as source". An unmapped/unknown result falls back to wav rather
+    than muxing an arbitrary codec into an unsupported container.
+    """
+    ext = (fmt or src_suffix.lstrip(".") or "wav").lower()
+    if f".{ext}" not in _AUDIO_CODEC_FOR_SUFFIX:
+        ext = "wav"
+    return Path(f"{stem}_synced.{ext}")
 
 
 def _quality_options(codec: str, crf: int) -> dict[str, str]:
@@ -88,6 +105,7 @@ def encode_clip(
     *,
     video_codec: str | None = None,
     crf: int = 18,
+    audio_bitrate: int | None = None,
     device: str = "cpu",
 ) -> None:
     """Encode and mux one clip to a single container file.
@@ -104,6 +122,8 @@ def encode_clip(
             is given.
         video_codec: Override encoder name; defaults to pick_video_codec(device).
         crf: Constant quality for the video stream (mapped to cq on NVENC).
+        audio_bitrate: Target bit rate in bits/sec for lossy audio codecs
+            (aac/libmp3lame); ignored for lossless codecs (pcm/flac).
         device: "cpu" or "cuda[:<index>]"; selects the default encoder. Does
             not move the frame tensor — h264_nvenc uploads from host memory
             itself.
@@ -145,6 +165,8 @@ def encode_clip(
             layout = "mono" if audio_samples.shape[0] == 1 else "stereo"
             acodec = _audio_codec_for(out_path)
             astream = container.add_stream(acodec, rate=sample_rate, layout=layout)
+            if audio_bitrate is not None and acodec in _LOSSY_AUDIO_CODECS:
+                astream.bit_rate = audio_bitrate
 
         if vstream is not None:
             frames = video_frames.cpu()

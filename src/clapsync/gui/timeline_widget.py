@@ -109,6 +109,9 @@ class TrackState:
     offset_s: float
     duration_s: float
     locked: bool = False
+    muted: bool = False
+    kind: str = "video"  # "video" or "audio" — shown by the track panel
+    warn: bool = False  # low-confidence alignment — flagged in the track panel
 
     @property
     def color(self) -> QColor:
@@ -123,6 +126,7 @@ class TrackState:
 
 class TimelineWidget(QWidget):
     playhead_changed = Signal(float)  # user seek in global seconds
+    vscroll_changed = Signal(int)     # vertical scroll offset in pixels
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -138,6 +142,7 @@ class TimelineWidget(QWidget):
         self._drag_mode: str | None = None
         self._drag_start_x: float = 0.0
         self._drag_start_value: float = 0.0
+
 
         self._hscroll = QScrollBar(Qt.Orientation.Horizontal, self)
         self._hscroll.setStyleSheet(self._scrollbar_style())
@@ -288,6 +293,9 @@ class TimelineWidget(QWidget):
         painter.restore()
 
     def _draw_tracks(self, painter: QPainter, w: int, track_area_h: int) -> None:
+        # Track identity (name, kind, mute) lives in the fixed TrackHeaderPanel
+        # to the left; the bars carry only the clip block and a lock badge, so
+        # they stay readable while scrolling.
         for i, track in enumerate(self._tracks):
             rect = self._track_rect(track)
 
@@ -303,17 +311,9 @@ class TimelineWidget(QWidget):
             painter.setPen(QPen(darker, 1))
             painter.drawRect(rect)
 
-            text_x = rect.left() + 4
-            label_rect = QRectF(text_x, rect.top(), rect.width() - 8, rect.height())
-            painter.setPen(QPen(QColor("white"), 1))
-            painter.drawText(label_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, track.label)
-
             if track.locked:
-                fm = QFontMetricsF(painter.font())
-                text_w = fm.horizontalAdvance(track.label)
                 icon_size = TRACK_H * 0.38
-                icon_gap = 5.0
-                icon_cx = text_x + text_w + icon_gap + icon_size * 0.5
+                icon_cx = rect.left() + icon_size * 0.5 + 6.0
                 icon_cy = rect.center().y()
                 self._draw_lock_icon(painter, icon_cx, icon_cy, icon_size)
 
@@ -425,6 +425,7 @@ class TimelineWidget(QWidget):
         self._vscroll.setVisible(needs)
         if needs:
             track_area_h = self._track_area_h()
+            self._vscroll.setGeometry(self._content_w(), HEADER_H, SCROLLBAR_W, track_area_h)
             content_h = self._tracks_content_h()
             max_val = max(0, content_h - track_area_h)
             self._scroll_y = min(self._scroll_y, float(max_val))
@@ -443,6 +444,7 @@ class TimelineWidget(QWidget):
 
     def _on_vscrollbar_changed(self, value: int) -> None:
         self._scroll_y = float(value)
+        self.vscroll_changed.emit(value)
         self.update()
 
     def _tick_interval(self) -> float:

@@ -19,6 +19,7 @@ from clapsync.app.encode import (
     _quality_options,
     encode_clip,
     pick_video_codec,
+    resolve_audio_output,
 )
 from clapsync.app.media import MediaInfo, probe
 from clapsync.app.sync import offsets_from_media
@@ -66,6 +67,8 @@ class ExportSettings:
     video_codec: str | None = None
     crf: int = 18
     audio_format: str | None = None
+    audio_sample_rate: int | None = None
+    audio_bitrate: int | None = None
 
 
 @dataclass(frozen=True)
@@ -290,6 +293,7 @@ def _build_audio_samples(
     info: MediaInfo,
     offset: float,
     trim: TimeRange,
+    target_rate: int | None = None,
 ) -> tuple[torch.Tensor, int]:
     """Trim + silence-pad the track audio to the shared trim range.
 
@@ -297,11 +301,13 @@ def _build_audio_samples(
         info: Probed source track (must have audio).
         offset: Track offset on the shared timeline (seconds).
         trim: Output range on the shared timeline.
+        target_rate: If set, decode/resample to this sample rate (via
+            ffmpeg's own resampler) instead of the source's native rate.
 
     Returns:
         (samples, sample_rate) where samples has shape (channels, N).
     """
-    wave, rate = load_audio(info.path)
+    wave, rate = load_audio(info.path, target_rate)
     local_start, local_end, pad_start, pad_end = clip_window(
         offset, info.duration, trim,
     )
@@ -339,15 +345,15 @@ def export_media(
                     info, offset, trim, settings, out_path, device,
                 )
             else:
-                audio, rate = _build_audio_samples(info, offset, trim)
-                ext = (
-                    settings.audio_format
-                    or info.path.suffix.lstrip(".")
-                    or "wav"
+                audio, rate = _build_audio_samples(
+                    info, offset, trim, settings.audio_sample_rate,
                 )
-                out_path = settings.output_dir / f"{info.path.stem}_synced.{ext}"
+                out_path = settings.output_dir / resolve_audio_output(
+                    info.path.stem, settings.audio_format, info.path.suffix,
+                ).name
                 encode_clip(
-                    out_path, None, None, audio, rate, device="cpu",
+                    out_path, None, None, audio, rate,
+                    audio_bitrate=settings.audio_bitrate, device="cpu",
                 )
             results.append(ExportResult(out_path))
         except Exception as exc:  # noqa: BLE001 — record per-track failure
@@ -426,13 +432,16 @@ def sync_and_trim(
         if progress is not None:
             progress(0.5 * f)
 
-    offsets = offsets_from_media(
+    alignment = offsets_from_media(
         media,
         reference_index=reference_index,
         refine=refine,
         progress=sync_progress,
         is_cancelled=is_cancelled,
     )
+    for warning in alignment.warnings:
+        logger.warning("sync: %s", warning)
+    offsets = alignment.offsets
 
     durations = [m.duration for m in media]
     rng = (common_time_range if trim == "common" else full_time_range)(

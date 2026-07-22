@@ -16,7 +16,13 @@ from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSizePolicy
 
-from framepipe import GroupFrame, PyAvVideoDecoder, TrackSpec, VideoGroupDecoder
+from framepipe import (
+    GroupFrame,
+    NvVideoDecoder,
+    PyAvVideoDecoder,
+    TrackSpec,
+    VideoGroupDecoder,
+)
 
 from clapsync.app.decode import ensure_preview_proxy
 
@@ -24,6 +30,11 @@ from clapsync.app.decode import ensure_preview_proxy
 _FPS = 30.0
 # GPU-resident NVDEC decode when a CUDA device is present, else software decode.
 _DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+# NVDEC (PyNvVideoCodec) on GPU, PyAV on CPU. PyAV's CUDA hwaccel path yields
+# intermittently corrupt frames on the mosaic, so the GPU path uses NVDEC via
+# framepipe's NvVideoDecoder instead; NvVideoDecoder needs a CUDA device, so CPU
+# hosts fall back to software PyAV decode.
+_DECODER = NvVideoDecoder if _DEVICE.startswith("cuda") else PyAvVideoDecoder
 
 
 def _to_numpy(frame: torch.Tensor) -> np.ndarray:
@@ -82,7 +93,7 @@ class VideoGroupWorker(QObject):
         # frame) for no benefit.
         tracks = [
             TrackSpec(
-                PyAvVideoDecoder(
+                _DECODER(
                     str(ensure_preview_proxy(Path(p)) if self._use_proxies else p),
                     device=_DEVICE,
                     batch_size=1,

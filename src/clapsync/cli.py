@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
 from clapsync.app import compute_sync_offsets, sync_and_trim
 from clapsync.app.media import probe
-from clapsync.core import common_time_range, full_time_range
+from clapsync.core import LOW_CONFIDENCE, common_time_range, full_time_range
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -17,7 +18,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
-    offsets = compute_sync_offsets(
+    alignment = compute_sync_offsets(
         args.inputs,
         reference_index=args.reference,
         refine=args.refine,
@@ -25,12 +26,15 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             f"\rsync {f * 100:3.0f}%", end="", file=sys.stderr
         ),
     )
+    offsets = alignment.offsets
     print(file=sys.stderr)
     durations = [probe(p).duration for p in args.inputs]
     common = common_time_range(durations, offsets)
     full = full_time_range(durations, offsets)
-    for path, off in zip(args.inputs, offsets):
-        print(f"{path.name}\toffset={off:+.4f}s")
+    for path, off, conf in zip(args.inputs, offsets, alignment.confidence):
+        conf_str = "ref" if math.isinf(conf) else f"{conf:.1f}"
+        low = "  LOW — verify manually" if conf < LOW_CONFIDENCE else ""
+        print(f"{path.name}\toffset={off:+.4f}s\tconfidence={conf_str}{low}")
     print(
         f"common range: {common.start:.4f}..{common.end:.4f}s"
         f" ({common.duration:.4f}s)"
