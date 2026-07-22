@@ -620,10 +620,18 @@ class SyncEditorWindow(QMainWindow):
         self._apply_clap_link()
 
     def _on_add_sound_clap(self) -> None:
-        """Add a custom sound clap at the playhead (a new proposal to link to)."""
-        self._sound_claps.append(self._global_pos)
+        """Add a custom sound clap at the playhead and link the c3d(s) to it."""
+        sound = self._global_pos
+        self._sound_claps.append(sound)
         self._sound_claps.sort()
-        self._rebuild_clap_markers()
+        for idx in self._mocap_indices():
+            movements = self._movements.get(idx)
+            if not movements:
+                continue
+            mv_idx = self._link.get(idx, (0, sound))[0]
+            self._link[idx] = (mv_idx, sound)
+            self._offsets[idx] = sound - movements[mv_idx]
+        self._apply_clap_link()
 
     def _on_set_c3d_clap(self) -> None:
         """Mark the c3d frame under the playhead as each c3d's clap movement."""
