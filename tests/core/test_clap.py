@@ -136,6 +136,15 @@ def test_clapperboard_reliability_accepts_valid_rejects_garbage():
     assert not clapperboard_reliability(garbage_t, valid, garbage_b, valid)[0]
 
 
+def test_clapperboard_reliability_rejects_detached_top():
+    # Bottom is a plane (z=0); top is colinear but tilted along the plane normal
+    # (z) — a detached top that is not parallel to the plane.
+    bottom = np.array([[[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]]], float)
+    top = np.array([[[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3]]], float)
+    valid = np.ones((1, 4), dtype=bool)
+    assert not clapperboard_reliability(top, valid, bottom, valid)[0]
+
+
 def test_clapperboard_reliability_marks_occluded_frames_unreliable():
     bottom = np.zeros((1, 4, 3))
     top = np.zeros((1, 4, 3))

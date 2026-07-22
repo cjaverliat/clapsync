@@ -12,6 +12,7 @@ bottom-arm marker centroids collapses at peak closing velocity.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -40,6 +41,7 @@ _SNAP_MIN_SEP_S = 0.3      # min separation between distinct snaps
 # is a line. Bad tracking scatters the markers; reject those frames.
 _PLANE_TOL = 0.05          # bottom coplanarity: 3rd/1st singular value below this
 _LINE_TOL = 0.15           # top colinearity: 2nd/1st singular value below this
+_PARALLEL_TOL_DEG = 15.0   # max angle of the top line to the bottom plane
 _RELIABLE_WINDOW_S = 0.5   # debounce window before a snap
 _RELIABLE_FRAC = 0.6       # min reliable fraction in that window
 
@@ -257,17 +259,28 @@ def clapperboard_reliability(
     Returns:
         (n_frames,) bool reliability mask.
     """
-    n = top_pts.shape[0]
     reliable = top_valid.all(axis=1) & bottom_valid.all(axis=1)
 
+    bottom_normal = None
     if bottom_pts.shape[1] >= 3:
         centred = bottom_pts - bottom_pts.mean(axis=1, keepdims=True)
-        sv = np.linalg.svd(centred, compute_uv=False)  # (n, 3)
+        _u, sv, vt = np.linalg.svd(centred)  # sv (n,3), vt (n,3,3)
         reliable &= sv[:, 2] <= _PLANE_TOL * (sv[:, 0] + 1e-9)
+        bottom_normal = vt[:, 2, :]
+
+    top_dir = None
     if top_pts.shape[1] >= 3:
         centred = top_pts - top_pts.mean(axis=1, keepdims=True)
-        sv = np.linalg.svd(centred, compute_uv=False)
+        _u, sv, vt = np.linalg.svd(centred)
         reliable &= sv[:, 1] <= _LINE_TOL * (sv[:, 0] + 1e-9)
+        top_dir = vt[:, 0, :]
+
+    # The top arm hinges within the bottom plane, so its line stays parallel to
+    # that plane (both open and closed). A detached/badly-tracked top tilts away
+    # — its direction gains a component along the plane normal.
+    if bottom_normal is not None and top_dir is not None:
+        sin_angle = np.abs(np.einsum("ij,ij->i", top_dir, bottom_normal))
+        reliable &= sin_angle <= math.sin(math.radians(_PARALLEL_TOL_DEG))
     return reliable
 
 
