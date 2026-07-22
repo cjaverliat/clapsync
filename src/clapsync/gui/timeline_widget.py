@@ -129,6 +129,106 @@ class TrackState:
         return self.offset_s + self.duration_s
 
 
+class ZoomScrollBar(QWidget):
+    """NLE-style zoom/pan bar: a window over the whole timeline.
+
+    Drag the window body to pan; drag either edge handle to resize it (zoom).
+    Emits the visible [start, end] range in seconds.
+    """
+
+    _HANDLE_W = 7        # px grab zone at each edge
+    _MIN_THUMB_W = 18    # px minimum window width
+
+    range_changed = Signal(float, float)  # visible v0, v1 in seconds
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(SCROLLBAR_H)
+        self.setMouseTracking(True)
+        self._total = 1.0
+        self._v0 = 0.0
+        self._v1 = 1.0
+        self._drag: str | None = None
+        self._drag_x = 0.0
+        self._drag_v = (0.0, 0.0)
+
+    def set_view(self, total: float, v0: float, v1: float) -> None:
+        self._total = max(total, 1e-6)
+        self._v0 = max(0.0, min(v0, self._total))
+        self._v1 = max(self._v0, min(v1, self._total))
+        self.update()
+
+    def _x_of(self, s: float) -> float:
+        return s / self._total * self.width()
+
+    def _dark(self) -> bool:
+        return self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark = self._dark()
+        painter.fillRect(self.rect(), QColor("#202020") if dark else QColor("#E0E0E0"))
+        x0 = self._x_of(self._v0)
+        x1 = max(x0 + self._MIN_THUMB_W, self._x_of(self._v1))
+        thumb = QRectF(x0, 2, x1 - x0, self.height() - 4)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#5A5A5A") if dark else QColor("#B0B0B0"))
+        painter.drawRoundedRect(thumb, 3, 3)
+        grip = QColor("#888888") if dark else QColor("#808080")
+        painter.setPen(QPen(grip, 2))
+        for gx in (x0 + 3, x1 - 3):
+            painter.drawLine(int(gx), int(thumb.top() + 3),
+                             int(gx), int(thumb.bottom() - 3))
+        painter.end()
+
+    def _zone(self, x: float) -> str | None:
+        x0 = self._x_of(self._v0)
+        x1 = max(x0 + self._MIN_THUMB_W, self._x_of(self._v1))
+        if abs(x - x0) <= self._HANDLE_W:
+            return "left"
+        if abs(x - x1) <= self._HANDLE_W:
+            return "right"
+        if x0 <= x <= x1:
+            return "body"
+        return None
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._drag = self._zone(event.position().x())
+        self._drag_x = event.position().x()
+        self._drag_v = (self._v0, self._v1)
+
+    def mouseMoveEvent(self, event) -> None:
+        x = event.position().x()
+        if self._drag is None:
+            zone = self._zone(x)
+            self.setCursor(
+                Qt.CursorShape.SizeHorCursor if zone in ("left", "right")
+                else Qt.CursorShape.OpenHandCursor if zone == "body"
+                else Qt.CursorShape.ArrowCursor
+            )
+            return
+        ds = (x - self._drag_x) / max(1, self.width()) * self._total
+        v0, v1 = self._drag_v
+        min_w = self._MIN_THUMB_W / max(1, self.width()) * self._total
+        if self._drag == "body":
+            width = v1 - v0
+            v0 = max(0.0, min(self._total - width, v0 + ds))
+            v1 = v0 + width
+        elif self._drag == "left":
+            v0 = max(0.0, min(v1 - min_w, v0 + ds))
+        else:
+            v1 = min(self._total, max(v0 + min_w, v1 + ds))
+        self._v0, self._v1 = v0, v1
+        self.range_changed.emit(v0, v1)
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag = None
+
+
 class TimelineWidget(QWidget):
     playhead_changed = Signal(float)  # user seek in global seconds
     vscroll_changed = Signal(int)     # vertical scroll offset in pixels
@@ -153,11 +253,8 @@ class TimelineWidget(QWidget):
         self._drag_start_value: float = 0.0
 
 
-        self._hscroll = QScrollBar(Qt.Orientation.Horizontal, self)
-        self._hscroll.setStyleSheet(self._scrollbar_style())
-        self._hscroll.setFixedHeight(SCROLLBAR_H)
-        self._hscroll.setSingleStep(10)
-        self._hscroll.valueChanged.connect(self._on_scrollbar_changed)
+        self._hscroll = ZoomScrollBar(self)
+        self._hscroll.range_changed.connect(self._on_view_range_changed)
 
         self._vscroll = QScrollBar(Qt.Orientation.Vertical, self)
         self._vscroll.setStyleSheet(self._vscrollbar_style())
@@ -180,14 +277,12 @@ class TimelineWidget(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self._hscroll.setStyleSheet(self._scrollbar_style())
         self._vscroll.setStyleSheet(self._vscrollbar_style())
         self.update()
 
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
-            self._hscroll.setStyleSheet(self._scrollbar_style())
             self._vscroll.setStyleSheet(self._vscrollbar_style())
             self.update()
 
@@ -539,16 +634,9 @@ class TimelineWidget(QWidget):
     def _update_scrollbar(self) -> None:
         if self.width() == 0:
             return
-        total_px = int(self._total_duration() * self._zoom)
+        total = self._total_duration()
         viewport_w = self._content_w()
-        max_val = max(0, total_px + _SCROLL_MARGIN * 2 - viewport_w)
-        current = max(0, int(_SCROLL_MARGIN - self._scroll_x))
-        self._hscroll.blockSignals(True)
-        self._hscroll.setRange(0, max_val)
-        self._hscroll.setPageStep(viewport_w)
-        self._hscroll.setSingleStep(max(1, int(self._zoom * 0.1)))
-        self._hscroll.setValue(min(current, max_val))
-        self._hscroll.blockSignals(False)
+        self._hscroll.set_view(total, self._x_to_s(0), self._x_to_s(viewport_w))
 
     def _update_vscrollbar(self) -> None:
         needs = self._needs_vscroll()
@@ -568,9 +656,14 @@ class TimelineWidget(QWidget):
         else:
             self._scroll_y = 0.0
 
-    def _on_scrollbar_changed(self, value: int) -> None:
-        self._scroll_x = float(_SCROLL_MARGIN - value)
+    def _on_view_range_changed(self, v0: float, v1: float) -> None:
+        """Apply a visible range from the zoom scrollbar as zoom + scroll."""
+        viewport_w = self._content_w()
+        width_s = max(1e-6, v1 - v0)
+        self._zoom = max(MIN_ZOOM, min(MAX_ZOOM, viewport_w / width_s))
+        self._scroll_x = -v0 * self._zoom
         self.update()
+        self._update_scrollbar()  # reflect any zoom clamp back onto the thumb
 
     def _on_vscrollbar_changed(self, value: int) -> None:
         self._scroll_y = float(value)
