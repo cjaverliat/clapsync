@@ -319,14 +319,29 @@ class SyncEditorWindow(QMainWindow):
             )
         )
 
+    def _reference_index(self) -> int:
+        """The sync-reference track: the first audio-bearing track, never a c3d.
+
+        Mirrors align_media's reference choice so the timeline locks the track
+        that is actually pinned to offset 0.
+        """
+        for i, info in enumerate(self._video_infos):
+            if info.kind != "mocap" and info.has_audio:
+                return i
+        for i, info in enumerate(self._video_infos):
+            if info.kind != "mocap":
+                return i
+        return 0
+
     def _init_timeline(self) -> None:
+        reference = self._reference_index()
         tracks = [
             TrackState(
                 index=i,
                 label=info.path.stem,
                 offset_s=self._offsets[i],
                 duration_s=info.duration,
-                locked=i == 0,
+                locked=i == reference,
                 muted=self._muted[i] if i < len(self._muted) else False,
                 kind=info.kind,
                 warn=i < len(self._low_confidence) and self._low_confidence[i],
