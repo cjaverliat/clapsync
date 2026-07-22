@@ -4,7 +4,12 @@ import av
 import pytest
 import torch
 
-from clapsync.app.encode import encode_clip, pick_video_codec, _quality_options
+from clapsync.app.encode import (
+    _audio_codec_for,
+    encode_clip,
+    pick_video_codec,
+    _quality_options,
+)
 
 
 def _frames(n=30, h=48, w=64):
@@ -107,3 +112,22 @@ def test_quality_options_other_codec_uses_crf():
     """Any codec other than h264_nvenc uses crf."""
     result = _quality_options("libx265", 21)
     assert result == {"crf": "21"}
+
+
+def test_audio_codec_map_covers_supported_formats():
+    from pathlib import Path
+    assert _audio_codec_for(Path("x.wav")) == "pcm_s16le"
+    assert _audio_codec_for(Path("x.flac")) == "flac"
+    assert _audio_codec_for(Path("x.mp3")) == "libmp3lame"
+    assert _audio_codec_for(Path("x.m4a")) == "aac"
+    assert _audio_codec_for(Path("x.aac")) == "aac"
+
+
+def test_encode_audio_only_sets_bitrate_for_lossy(tmp_path):
+    import av
+    out = tmp_path / "a.mp3"
+    encode_clip(out, None, None, _tone(1.0), 48000, audio_bitrate=192000)
+    with av.open(str(out)) as c:
+        a = c.streams.audio[0]
+        # libmp3lame honors the requested bit_rate on the stream.
+        assert a.codec_context.bit_rate in (192000, pytest.approx(192000, abs=32000))

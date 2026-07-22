@@ -27,10 +27,14 @@ def main(paths: list[str]) -> None:
         rates.append(rate)
         durations.append(wave.shape[-1] / rate)
 
-    offsets = align_waveforms(waveforms, rates)
+    alignment = align_waveforms(waveforms, rates)
+    offsets = alignment.offsets
 
-    for path, offset in zip(paths, offsets):
-        print(f"{path:30s} offset = {offset:+.4f} s")
+    for path, offset, conf in zip(paths, offsets, alignment.confidence):
+        conf_str = "ref" if conf == float("inf") else f"{conf:.1f}"
+        print(f"{path:30s} offset = {offset:+.4f} s  confidence = {conf_str}")
+    for warning in alignment.warnings:
+        print(f"  ! {warning}")
 
     common = common_time_range(durations, offsets)
     full = full_time_range(durations, offsets)

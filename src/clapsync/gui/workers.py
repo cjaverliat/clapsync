@@ -13,6 +13,7 @@ from clapsync.app import ExportSettings, compute_sync_offsets
 from clapsync.app.decode import ensure_preview_proxy
 from clapsync.app.export import export_media
 from clapsync.app.media import MediaInfo
+from clapsync.core import Alignment
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def _fmt_eta(seconds: float) -> str:
 class OffsetWorker(QObject):
     progress_value = Signal(int)  # 0..1000
     status = Signal(str)  # human-readable current stage
-    finished = Signal(list)
+    finished = Signal(object)  # Alignment
     failed = Signal(str)
 
     def __init__(self, paths: list[Path]) -> None:
@@ -39,12 +40,12 @@ class OffsetWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            offsets = compute_sync_offsets(
+            alignment = compute_sync_offsets(
                 self._paths,
                 progress=lambda f: self.progress_value.emit(int(f * 1000)),
                 status=lambda s: self.status.emit(s),
             )
-            self.finished.emit(offsets)
+            self.finished.emit(alignment)
         except Exception as exc:  # noqa: BLE001
             logger.exception("offset worker failed")
             self.failed.emit(str(exc))
@@ -166,11 +167,11 @@ def _run_with_progress(worker, title: str, parent):
 
 def compute_offsets_with_progress(
     paths: list[Path], parent=None
-) -> list[float] | None:
+) -> Alignment | None:
     """Compute sync offsets behind a modal progress dialog.
 
     Returns:
-        Computed offsets, or None if cancelled or an error occurred.
+        Computed alignment, or None if cancelled or an error occurred.
     """
     result, error = _run_with_progress(
         OffsetWorker(paths), "Computing Offsets", parent

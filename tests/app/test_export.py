@@ -18,7 +18,7 @@ def test_export_tracks_takes_paths(av_video, tmp_path):
     a, *_ = av_video(seconds=1.0, fps=30.0, w=256, h=144, name="a.mp4")
     b, *_ = av_video(seconds=1.0, fps=30.0, w=256, h=144, name="b.mp4")
     paths = [a, b]
-    offsets = compute_sync_offsets(paths)
+    offsets = compute_sync_offsets(paths).offsets
     durations = [probe(p).duration for p in paths]
     settings = ExportSettings(
         trim=common_time_range(durations, offsets), output_dir=tmp_path,
@@ -89,6 +89,28 @@ def test_export_black_pads_offset_gap(av_video, tmp_path):
     )
     assert results[0].ok, results[0].error
     assert abs(probe(results[0].path).duration - 3.0) < 0.15
+
+
+def test_export_audio_only_resamples_and_picks_format(tone_wav, tmp_path):
+    from clapsync.app.export import export_tracks, ExportSettings
+    from clapsync.core import common_time_range
+    import av
+    a, sr = tone_wav(seconds=1.0, sample_rate=48000, name="a.wav")
+    b, _ = tone_wav(seconds=1.0, sample_rate=48000, freq=660.0, name="b.wav")
+    offsets = [0.0, 0.0]
+    durations = [1.0, 1.0]
+    out = tmp_path / "out"
+    out.mkdir()
+    settings = ExportSettings(
+        trim=common_time_range(durations, offsets), output_dir=out,
+        audio_format="flac", audio_sample_rate=44100,
+    )
+    results = export_tracks([a, b], offsets, settings)
+    assert all(r.ok for r in results), [r.error for r in results]
+    outs = sorted(out.glob("*_synced.flac"))
+    assert len(outs) == 2
+    with av.open(str(outs[0])) as c:
+        assert c.streams.audio[0].codec_context.sample_rate == 44100
 
 
 @pytest.mark.slow

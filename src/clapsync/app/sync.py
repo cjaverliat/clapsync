@@ -13,6 +13,7 @@ import torch
 from clapsync.app.decode import load_audio
 from clapsync.app.media import MediaInfo, probe
 from clapsync.core.offsets import Refine, align_waveforms
+from clapsync.core.solver import Alignment
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ def offsets_from_media(
     progress: Callable[[float], None] | None = None,
     status: Callable[[str], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
-) -> list[float]:
+) -> Alignment:
     """Load audio for already-probed tracks and align them (no re-probe).
 
     Internal helper so callers that already hold MediaInfo (e.g. sync_and_trim)
@@ -37,6 +38,9 @@ def offsets_from_media(
         target_rate: Decode/resample audio to this rate before alignment. MFCC
             sync needs far less than the native 48 kHz, so downsampling shrinks
             the align stage. Pass None to keep each track's native rate.
+
+    Returns:
+        Alignment (offsets, per-track confidence, warnings); offsets[reference_index] == 0.0.
 
     Raises:
         ValueError: If any track has no audio stream.
@@ -49,7 +53,7 @@ def offsets_from_media(
 
     n = len(media)
     if is_cancelled is not None and is_cancelled():
-        return [0.0] * n
+        return Alignment([0.0] * n, [0.0] * n, [])
 
     waveforms: list[torch.Tensor | None] = [None] * n
     rates: list[int] = [0] * n
@@ -94,7 +98,7 @@ def offsets_from_media(
             if is_cancelled is not None and is_cancelled():
                 for pending in futures:
                     pending.cancel()
-                return [0.0] * n
+                return Alignment([0.0] * n, [0.0] * n, [])
             future.result()  # surface any load_audio exception
 
     if status is not None:
@@ -116,7 +120,7 @@ def compute_sync_offsets(
     progress: Callable[[float], None] | None = None,
     status: Callable[[str], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
-) -> list[float]:
+) -> Alignment:
     """Probe, load audio, and align paths by MFCC cross-correlation.
 
     Args:
@@ -130,13 +134,14 @@ def compute_sync_offsets(
         is_cancelled: Optional cooperative cancel check.
 
     Returns:
-        Per-track offset in seconds; offset[reference_index] == 0.0.
+        Alignment (offsets, per-track confidence, warnings); offsets[reference_index] == 0.0.
 
     Raises:
         ValueError: If any input has no audio stream.
     """
     if is_cancelled is not None and is_cancelled():
-        return [0.0] * len(paths)
+        n = len(paths)
+        return Alignment([0.0] * n, [0.0] * n, [])
     media = []
     for i, p in enumerate(paths):
         if status is not None:

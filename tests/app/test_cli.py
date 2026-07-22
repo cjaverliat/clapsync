@@ -14,6 +14,7 @@ def test_cli_sync_prints_offsets(av_video, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "offset" in out.lower()
+    assert "confidence" in out.lower()
 
 
 @pytest.mark.slow

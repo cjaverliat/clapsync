@@ -8,7 +8,7 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from clapsync.gui.video_selection_dialog import VideoSelectionDialog
+from clapsync.gui.media_selection_dialog import MediaSelectionDialog
 
 logger = logging.getLogger(__name__)
 
@@ -81,24 +81,40 @@ def main() -> None:
     _sig_timer.start(200)
     _sig_timer.timeout.connect(lambda: None)
 
-    sel = VideoSelectionDialog()
+    sel = MediaSelectionDialog()
     if sel.exec() != QDialog.DialogCode.Accepted:
         sys.exit(0)
 
-    video_paths = sel.get_video_paths()
+    video_paths = sel.get_media_paths()
 
     # Deferred: importing these pulls torch/torchaudio/framepipe (~3s + CUDA
     # init). Keeping them out of module scope lets the selection dialog above
     # paint instantly instead of after the whole decode stack loads.
+    from clapsync.core import LOW_CONFIDENCE
     from clapsync.gui.sync_editor import SyncEditorWindow
     from clapsync.gui.workers import (
         compute_offsets_with_progress,
         prepare_proxies_with_progress,
     )
 
-    offsets = compute_offsets_with_progress(video_paths)
-    if offsets is None:
+    alignment = compute_offsets_with_progress(video_paths)
+    if alignment is None:
         sys.exit(0)
+    offsets = alignment.offsets
+
+    if alignment.warnings:
+        lines = "\n".join(f"• {w}" for w in alignment.warnings)
+        scores = "\n".join(
+            f"• {p.name}: confidence {c:.1f}"
+            for p, c in zip(video_paths, alignment.confidence)
+            if c < LOW_CONFIDENCE
+        )
+        QMessageBox.warning(
+            None,
+            "Low sync confidence",
+            f"Automatic sync may be wrong for some tracks:\n\n{lines}\n\n"
+            f"Scores (below {LOW_CONFIDENCE:g} needs manual verification):\n{scores}",
+        )
 
     use_proxies = _decide_use_proxies(video_paths, args.use_proxies)
 
@@ -108,8 +124,10 @@ def main() -> None:
     if use_proxies and not prepare_proxies_with_progress(video_paths):
         sys.exit(0)
 
+    low = [c < LOW_CONFIDENCE for c in alignment.confidence]
     window = SyncEditorWindow(
-        video_paths=video_paths, offsets=offsets, use_proxies=use_proxies
+        video_paths=video_paths, offsets=offsets, use_proxies=use_proxies,
+        low_confidence=low,
     )
     window.showMaximized()
     sys.exit(app.exec())
