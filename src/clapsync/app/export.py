@@ -23,7 +23,8 @@ from clapsync.app.encode import (
     pick_video_codec,
     resolve_audio_output,
 )
-from clapsync.app.media import MediaInfo, probe
+from clapsync.app import fbx
+from clapsync.app.media import MediaInfo, is_av, probe
 from clapsync.app.sync import align_media
 from clapsync.core.offsets import Refine
 from clapsync.core.timerange import TimeRange, common_time_range, full_time_range
@@ -370,6 +371,19 @@ def _export_mocap_track(
     write_c3d(out_path, trimmed)
 
 
+def _export_fbx_track(
+    info: MediaInfo, offset: float, trim: TimeRange, out_path: Path
+) -> None:
+    """Trim + freeze-pad an fbx track to the shared trim range and write it.
+
+    The fbx rides the same window math as every other track; ``fbx.trim_fbx``
+    turns the seconds window into the frame-aligned, pad-held animation (see
+    ``_export_mocap_track`` for the parallel c3d path).
+    """
+    window = clip_window(offset, info.duration, trim)
+    fbx.trim_fbx(info.path, out_path, window, info.fps)
+
+
 def export_media(
     media: list[MediaInfo],
     offsets: list[float],
@@ -403,6 +417,9 @@ def export_media(
             if info.kind == "mocap":
                 out_path = settings.output_dir / f"{info.path.stem}_synced.c3d"
                 _export_mocap_track(info, offset, trim, out_path)
+            elif info.kind == "fbx":
+                out_path = settings.output_dir / f"{info.path.stem}_synced.fbx"
+                _export_fbx_track(info, offset, trim, out_path)
             elif info.kind == "video":
                 out_path = settings.output_dir / f"{info.path.stem}_synced.mp4"
                 _export_video_track(
@@ -516,7 +533,7 @@ def sync_and_trim(
     # The trim range is taken over audio/video only — a c3d's offset is set by
     # its clap link and can move, so it should not constrain the default window.
     # Export still applies the chosen trim to every track (c3d included).
-    av = [(m.duration, o) for m, o in zip(media, offsets) if m.kind != "mocap"]
+    av = [(m.duration, o) for m, o in zip(media, offsets) if is_av(m.kind)]
     durations, av_offsets = (
         ([d for d, _ in av], [o for _, o in av]) if av
         else ([m.duration for m in media], offsets)

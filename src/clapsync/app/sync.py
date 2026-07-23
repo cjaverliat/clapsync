@@ -11,7 +11,7 @@ from typing import Callable
 import torch
 
 from clapsync.app.decode import load_audio
-from clapsync.app.media import MediaInfo, probe
+from clapsync.app.media import MediaInfo, is_av, probe
 from clapsync.app.mocap_sync import MarkerChoices, bridge_mocap_offsets
 from clapsync.core.offsets import Refine, align_waveforms
 from clapsync.core.solver import Alignment
@@ -140,8 +140,8 @@ def align_media(
         ValueError: If an audio/video track has no audio stream.
     """
     n = len(media)
-    av_idx = [i for i, m in enumerate(media) if m.kind != "mocap"]
-    mocap_idx = [i for i, m in enumerate(media) if m.kind == "mocap"]
+    av_idx = [i for i, m in enumerate(media) if is_av(m.kind)]
+    mocap_idx = [i for i, m in enumerate(media) if not is_av(m.kind)]
 
     if not mocap_idx:
         return offsets_from_media(
@@ -160,7 +160,7 @@ def align_media(
     # never a silent video. Fall back to the first audio-bearing track.
     valid_ref = (
         0 <= reference_index < n
-        and media[reference_index].kind != "mocap"
+        and is_av(media[reference_index].kind)
         and media[reference_index].has_audio
     )
     if not valid_ref:

@@ -1,7 +1,7 @@
 # FBX trim boundary fix + remaining plumbing — next objectives
 
 **Date:** 2026-07-23
-**Status:** open — resume here
+**Status:** Objectives 1, 2, 3, 5 done; Objective 4 (GUI) remains.
 **Feature spec:** `2026-07-23-fbx-mocap-tracks-design.md`
 
 Foundations are committed (`75de06f`): the py3.13 + bpy 5.2 env, the PySide6 6.8
@@ -9,6 +9,42 @@ worker-signal fix, the `track_family`/`is_av` model + `.fbx` kind, and a working
 `probe_fbx()`. What remains is (1) getting `trim_fbx()` correct and (2) wiring
 the feature through the app. This doc captures the hard-won bpy findings so the
 next session doesn't rediscover them.
+
+## Resolution (2026-07-23, session 2) — Objectives 1, 2, 3, 5 done
+
+- **Objective 1 (trim boundary) — the "bug" was a misdiagnosis.** The ~3-frame
+  offset was a **bezier-easing artifact of the synthetic 2-keyframe cube**:
+  sampling a bezier between two distant keys returns eased (S-curve) values that
+  *look* like a frame shift. Real optical mocap carries a key on **every** frame
+  (jam_.fbx: ~100 objects × 15 270 keys), so baking at `bake_anim_step=1.0`
+  samples *at* keys and returns exact values regardless of handles — zero offset.
+  Verified on jam_.fbx and a dense synthetic fixture. `trim_fbx` now: delete
+  out-of-window keys, shift so the first kept frame lands at output frame
+  `pad_front + 1` (mirrors c3d `first_frame=1`), CONSTANT extrapolation for the
+  freeze-pads, `action.use_frame_range=[1,total]` + default
+  `bake_anim_use_all_actions=True` (the old `=False` exported nothing).
+  `_anim_frame_range` now skips keyless actions (a static `Position` slot was
+  dragging the origin to frame 0).
+- **Perf:** the per-key Python edit loop ran **~80 min** on jam_.fbx (20.4M keys,
+  O(n²) `remove()` + per-key `.co.x` crossings). Rewrote as a bulk
+  `foreach_get`/`clear`/`add`/`foreach_set` rebuild → **5.7 s** (~850×). Import
+  itself is only ~9 s. Handle-shifting dropped (integer baking never reads them).
+- **Objective 2:** every A/V-vs-mocap `kind !=/== "mocap"` gate flipped to
+  `is_av`/`not is_av` (sync `align_media`, `mocap_sync._sound_candidates`,
+  `export.sync_and_trim` trim, `sync_editor` reference/audio/clap-markers/refit,
+  `timeline_widget` default trim). c3d-specific gates (`_mocap_indices`,
+  `_has_mocap`, export dispatch) kept as `== "mocap"`.
+- **Objective 3:** `bridge_mocap_offsets` now places c3d by clap as before, then
+  fbx inherit the (first) c3d's offset+confidence; no c3d → offset 0 + warning.
+- **Objective 5:** `export_media` dispatches `kind == "fbx"` →
+  `_export_fbx_track` → `trim_fbx`, output `{stem}_synced.fbx`. `probe()` gained
+  a `.fbx` branch (kind="fbx", fps + duration from `probe_fbx`; bpy stays lazy).
+- **Tests:** `tests/app/test_fbx.py` (probe + trim interior/freeze/frame-count,
+  bpy-gated); `tests/integration/test_mocap_sync.py` (fbx inherits c3d offset +
+  excluded from A/V sync; no-c3d fbx warns).
+
+Objective 4 below (GUI lane + family grouping + offset slaving) is the only
+remaining work.
 
 ## Objective 1 — fix the fbx trim boundary (the blocker)
 

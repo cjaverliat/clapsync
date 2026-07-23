@@ -8,6 +8,7 @@ from typing import Literal
 import av
 from framepipe.metadata import extract_video_metadata
 
+from clapsync.app import fbx
 from clapsync.app import mocap
 
 
@@ -66,8 +67,9 @@ def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
 def probe(path: Path) -> MediaInfo:
     """Probe a media file via framepipe (video) and PyAV (audio) metadata.
 
-    A ``.c3d`` file is kind="mocap"; a file with a decodable video stream is
-    kind="video"; otherwise it is treated as audio-only.
+    A ``.c3d`` file is kind="mocap"; a ``.fbx`` file is kind="fbx" (probed via
+    bpy); a file with a decodable video stream is kind="video"; otherwise it is
+    treated as audio-only.
 
     Args:
         path: Source media path.
@@ -91,6 +93,16 @@ def probe(path: Path) -> MediaInfo:
             has_audio=False,
             kind="mocap",
             point_rate=point_rate,
+        )
+
+    if path.suffix.lower() == ".fbx":
+        fps, n_frames = fbx.probe_fbx(path)
+        return MediaInfo(
+            path=path,
+            duration=n_frames / fps if fps else 0.0,
+            has_audio=False,
+            kind="fbx",
+            fps=fps,
         )
 
     has_audio, sample_rate, audio_dur = _audio_meta(path)

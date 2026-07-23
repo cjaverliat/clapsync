@@ -11,6 +11,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QInputDialog, QScrollBar, QWidget
 
+from clapsync.app.media import is_av
 from clapsync.gui.waveform_widget import downsample_peaks
 
 HEADER_H = 28
@@ -763,7 +764,7 @@ class SyncTrimTimelineWidget(TimelineWidget):
         total = max((t.end_s for t in tracks), default=10.0)
         # The default trim covers the audio/video overlap only; a c3d is placed
         # by its clap link and may move, so it should not shrink the window.
-        av = [t for t in tracks if t.kind != "mocap"] or tracks
+        av = [t for t in tracks if is_av(t.kind)] or tracks
         shared_start = max((t.offset_s for t in av), default=0.0)
         shared_end   = min((t.end_s   for t in av), default=total)
         if shared_start < shared_end:

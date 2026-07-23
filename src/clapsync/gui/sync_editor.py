@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from clapsync.app import ExportResult, ExportSettings
 from clapsync.app.decode import load_audio
-from clapsync.app.media import MediaInfo, probe
+from clapsync.app.media import MediaInfo, is_av, probe
 from clapsync.app.mocap import load_c3d
 from clapsync.core import TimeRange
 from clapsync.core.timerange import common_time_range, full_time_range
@@ -422,10 +422,10 @@ class SyncEditorWindow(QMainWindow):
         that is actually pinned to offset 0.
         """
         for i, info in enumerate(self._video_infos):
-            if info.kind != "mocap" and info.has_audio:
+            if is_av(info.kind) and info.has_audio:
                 return i
         for i, info in enumerate(self._video_infos):
-            if info.kind != "mocap":
+            if is_av(info.kind):
                 return i
         return 0
 
@@ -454,7 +454,7 @@ class SyncEditorWindow(QMainWindow):
         self._audio = AudioEngine(self)
         waveforms = []
         for info in self._video_infos:
-            if info.kind == "mocap":
+            if not is_av(info.kind):
                 waveforms.append(torch.zeros(1, 1))  # motion capture is silent
                 continue
             try:
@@ -713,7 +713,7 @@ class SyncEditorWindow(QMainWindow):
             return
         markers: list[tuple[int, float, bool, str]] = []
         av_tracks = [i for i, inf in enumerate(self._video_infos)
-                     if inf.kind != "mocap"]
+                     if is_av(inf.kind)]
         for idx, (sound, move) in self._clap.items():
             markers.append((idx, self._offsets[idx] + move, True, "movement"))
             for i in av_tracks:
@@ -752,7 +752,7 @@ class SyncEditorWindow(QMainWindow):
         """Reset the trim to the audio/video overlap after offsets change."""
         av = [(info.duration, self._offsets[i])
               for i, info in enumerate(self._video_infos)
-              if info.kind != "mocap"]
+              if is_av(info.kind)]
         if not av:
             return
         durations = [d for d, _ in av]
