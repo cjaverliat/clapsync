@@ -240,6 +240,9 @@ class TimelineWidget(QWidget):
         self.setMinimumHeight(HEADER_H + TRACK_H + TRACK_PAD * 2 + SCROLLBAR_H + 20)
 
         self._tracks: list[TrackState] = []
+        # Display row per track index — lanes are grouped by family, decoupled
+        # from track.index (which stays the data key). Filled by set_tracks.
+        self._row_by_index: dict[int, int] = {}
         self._track_waveforms: dict[int, np.ndarray] = {}  # track index -> mono
         self._wave_cache: dict[int, tuple] = {}  # index -> (sig, x0, peaks)
         self._wave_version: int = 0  # bumped when the waveform set changes
@@ -312,6 +315,9 @@ class TimelineWidget(QWidget):
 
     def set_tracks(self, tracks: list[TrackState]) -> None:
         self._tracks = tracks
+        # tracks arrive in display order; the lane row is the list position,
+        # not track.index, so families can be grouped without disturbing data.
+        self._row_by_index = {t.index: row for row, t in enumerate(tracks)}
         self._playhead_s = 0.0
         self._update_vscrollbar()
         self._fit_zoom()
@@ -322,7 +328,13 @@ class TimelineWidget(QWidget):
         self.update()
 
     def get_offsets(self) -> list[float]:
-        return [t.offset_s for t in self._tracks]
+        # Keyed by track.index (not lane order) so the emitted list stays
+        # aligned with the caller's global per-track offsets.
+        n = max((t.index for t in self._tracks), default=-1) + 1
+        offsets = [0.0] * n
+        for track in self._tracks:
+            offsets[track.index] = track.offset_s
+        return offsets
 
     # ------------------------------------------------------------------ paint
 
@@ -660,7 +672,7 @@ class TimelineWidget(QWidget):
         return (x - self._scroll_x) / self._zoom
 
     def _track_rect(self, track: TrackState) -> QRectF:
-        i = track.index
+        i = self._row_by_index.get(track.index, track.index)
         y = HEADER_H + TRACK_PAD + i * (TRACK_H + TRACK_PAD) - self._scroll_y
         x = self._s_to_x(track.offset_s)
         w = track.duration_s * self._zoom
@@ -879,7 +891,9 @@ class SyncTrimTimelineWidget(TimelineWidget):
         x = float(event.position().x())
         y = float(event.position().y())
         for track in self._tracks:
-            if track.locked:
+            # Locked (the reference) and fbx lanes are not directly editable —
+            # an fbx offset is slaved to its c3d, never set by hand.
+            if track.locked or track.kind == "fbx":
                 continue
             rect = self._track_rect(track)
             if rect.contains(QPointF(x, y)):

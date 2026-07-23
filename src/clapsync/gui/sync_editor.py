@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from clapsync.app import ExportResult, ExportSettings
 from clapsync.app.decode import load_audio
-from clapsync.app.media import MediaInfo, is_av, probe
+from clapsync.app.media import MediaInfo, family_display_order, is_av, probe
 from clapsync.app.mocap import load_c3d
 from clapsync.core import TimeRange
 from clapsync.core.timerange import common_time_range, full_time_range
@@ -150,7 +150,12 @@ class SyncEditorWindow(QMainWindow):
         # Audio waveforms go in their own stacked panel below, so only the
         # visual sources (video, motion capture) tile the mosaic.
         _MIN_CELL_W = 200
-        n = sum(1 for info in self._video_infos if info.kind != "audio")
+        # Only visual sources tile the mosaic: video and c3d (marker preview).
+        # Audio has its waveform lane; an fbx is a timeline lane only (no cell).
+        n = sum(
+            1 for info in self._video_infos
+            if info.kind not in ("audio", "fbx")
+        )
         available_w = self.width() - 16
         if n > 0 and available_w // n >= _MIN_CELL_W:
             cols = n
@@ -196,7 +201,7 @@ class SyncEditorWindow(QMainWindow):
                         "failed to load waveform for %s: %s", info.path.name, exc
                     )
 
-            if info.kind == "audio":
+            if info.kind in ("audio", "fbx"):
                 continue
 
             cell = QWidget()
@@ -431,18 +436,21 @@ class SyncEditorWindow(QMainWindow):
 
     def _init_timeline(self) -> None:
         reference = self._reference_index()
+        # Lanes are grouped by family (A/V first, each fbx under its c3d); the
+        # TrackState keeps its global index, so data lookups are unaffected.
+        order = family_display_order([info.kind for info in self._video_infos])
         tracks = [
             TrackState(
                 index=i,
-                label=info.path.stem,
+                label=self._video_infos[i].path.stem,
                 offset_s=self._offsets[i],
-                duration_s=info.duration,
+                duration_s=self._video_infos[i].duration,
                 locked=i == reference,
                 muted=self._muted[i] if i < len(self._muted) else False,
-                kind=info.kind,
+                kind=self._video_infos[i].kind,
                 warn=i < len(self._low_confidence) and self._low_confidence[i],
             )
-            for i, info in enumerate(self._video_infos)
+            for i in order
         ]
         self._timeline.set_tracks(tracks)
         self._track_panel.set_tracks(tracks)
@@ -672,9 +680,32 @@ class SyncEditorWindow(QMainWindow):
             rate = self._video_infos[idx].point_rate or 0.0
             preview.set_frame(round((global_s - self._offsets[idx]) * rate))
 
+    def _sync_fbx_to_c3d(self, offsets: list[float]) -> list[float]:
+        """Slave every fbx offset to its c3d (single-c3d assumption).
+
+        An fbx shares the take with the c3d and is not independently placeable,
+        so it always sits at the c3d's offset. Mutates and returns ``offsets``;
+        a no-op when there is no c3d.
+        """
+        c3d = next(
+            (i for i, inf in enumerate(self._video_infos)
+             if inf.kind == "mocap"),
+            None,
+        )
+        if c3d is None:
+            return offsets
+        for i, info in enumerate(self._video_infos):
+            if info.kind == "fbx":
+                offsets[i] = offsets[c3d]
+        return offsets
+
     @Slot(list)
     def _on_offsets_changed(self, offsets: list[float]) -> None:
+        offsets = self._sync_fbx_to_c3d(offsets)
         self._offsets = offsets
+        # The fbx correction above may differ from what the timeline emitted, so
+        # push it back to keep the fbx lanes riding their c3d.
+        self._timeline.set_offsets(offsets)
         self._audio.set_offsets(offsets)
         if self._group_worker is not None:
             video_offsets = [offsets[i] for i in self._video_slots]
@@ -743,6 +774,7 @@ class SyncEditorWindow(QMainWindow):
 
     def _apply_clap_link(self) -> None:
         """Push updated c3d offsets to the timeline, trim, previews, markers."""
+        self._offsets = self._sync_fbx_to_c3d(self._offsets)
         self._timeline.set_offsets(self._offsets)
         self._refit_trim()
         self._on_offsets_changed(self._offsets)

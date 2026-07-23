@@ -1,7 +1,7 @@
 # FBX trim boundary fix + remaining plumbing — next objectives
 
 **Date:** 2026-07-23
-**Status:** Objectives 1, 2, 3, 5 done; Objective 4 (GUI) remains.
+**Status:** Done — Objectives 1–5 all complete.
 **Feature spec:** `2026-07-23-fbx-mocap-tracks-design.md`
 
 Foundations are committed (`75de06f`): the py3.13 + bpy 5.2 env, the PySide6 6.8
@@ -43,8 +43,22 @@ next session doesn't rediscover them.
   bpy-gated); `tests/integration/test_mocap_sync.py` (fbx inherits c3d offset +
   excluded from A/V sync; no-c3d fbx warns).
 
-Objective 4 below (GUI lane + family grouping + offset slaving) is the only
-remaining work.
+- **Objective 4 (GUI):** fbx probed at add time (probe() `.fbx` branch, bpy
+  lazy). fbx is a timeline lane only — excluded from the mosaic + preview (no
+  cell, alongside audio) and carries no waveform. Offset slaving:
+  `_sync_fbx_to_c3d` overwrites every fbx offset with its c3d's, called at the
+  top of `_on_offsets_changed` (then pushed back to the timeline) and
+  `_apply_clap_link`; fbx lanes are not editable (double-click skips them like
+  the locked reference). Family display grouping: `media.family_display_order`
+  (pure) orders lanes A/V-first then each fbx under its c3d; the timeline lane
+  row is now a `_row_by_index` map (display position) and `get_offsets` is keyed
+  by `track.index`, so display order and data indexing are decoupled. Tests:
+  `test_media.py` (family_display_order + is_av/track_family for fbx);
+  `tests/gui/test_track_layout.py` (lane row follows display order, get_offsets
+  stays index-keyed, headless). Regression: `test_playback_perf[1080p]` (full
+  window construct+play) still passes.
+
+All five objectives are complete; the feature is wired end to end.
 
 ## Objective 1 — fix the fbx trim boundary (the blocker)
 

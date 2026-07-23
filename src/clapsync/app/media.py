@@ -43,6 +43,35 @@ def is_av(kind: str) -> bool:
     return track_family(kind) == "av"
 
 
+def family_display_order(kinds: list[str]) -> list[int]:
+    """Row order for track lanes: A/V first, then the mocap family.
+
+    Within the mocap family each fbx is grouped directly under its c3d (a
+    single-c3d take, so every fbx sits under the first c3d; fbx with no c3d
+    trail the group). This is display order only — the returned values are the
+    original track indices, each appearing exactly once, so every data lookup
+    still keys by the track's own index.
+
+    Args:
+        kinds: Track kinds in input order.
+
+    Returns:
+        Track indices permuted into display order.
+    """
+    av = [i for i, kind in enumerate(kinds) if is_av(kind)]
+    c3ds = [i for i, kind in enumerate(kinds) if kind == "mocap"]
+    fbxs = [i for i, kind in enumerate(kinds) if kind == "fbx"]
+
+    mocap: list[int] = []
+    for c3d in c3ds:
+        mocap.append(c3d)
+        if c3d == c3ds[0]:  # fbx ride the first (assumed only) c3d
+            mocap.extend(fbxs)
+    if not c3ds:
+        mocap.extend(fbxs)
+    return av + mocap
+
+
 def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
     """Return (has_audio, sample_rate, duration) or (False, None, None).
 

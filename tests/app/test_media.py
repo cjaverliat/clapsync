@@ -1,6 +1,29 @@
 import pytest
 
-from clapsync.app.media import probe
+from clapsync.app.media import family_display_order, is_av, probe, track_family
+
+
+def test_track_family_and_is_av_group_fbx_with_mocap():
+    assert track_family("audio") == "av"
+    assert track_family("video") == "av"
+    assert track_family("mocap") == "mocap"
+    assert track_family("fbx") == "mocap"
+    assert is_av("video") and is_av("audio")
+    assert not is_av("mocap") and not is_av("fbx")
+
+
+def test_family_display_order_groups_fbx_under_c3d():
+    # video, c3d, fbx, audio, fbx  ->  A/V first, then c3d with both fbx under it.
+    kinds = ["video", "mocap", "fbx", "audio", "fbx"]
+    order = family_display_order(kinds)
+    assert order == [0, 3, 1, 2, 4]
+    # Every track appears exactly once — indices are permuted, never renamed.
+    assert sorted(order) == [0, 1, 2, 3, 4]
+
+
+def test_family_display_order_fbx_without_c3d_trails_av():
+    order = family_display_order(["audio", "fbx", "video"])
+    assert order == [0, 2, 1]  # audio, video, then the orphan fbx
 
 
 def test_probe_missing_file_raises(tmp_path):

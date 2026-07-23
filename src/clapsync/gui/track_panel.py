@@ -91,7 +91,11 @@ class TrackHeaderPanel(QWidget):
 
             # Kind icon.
             cy = rect.center().y()
-            kind_name = track.kind if track.kind in ("audio", "mocap") else "video"
+            kind_name = (
+                "mocap" if track.kind in ("mocap", "fbx")
+                else "audio" if track.kind == "audio"
+                else "video"
+            )
             kind_px = self._px(kind_name, 14, text_hex)
             painter.drawPixmap(QPointF(rect.left() + 15, cy - 7), kind_px)
 
