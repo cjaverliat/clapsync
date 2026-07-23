@@ -10,6 +10,14 @@ from PySide6.QtCore import QIODevice, QObject, QTimer, Signal
 logger = logging.getLogger(__name__)
 
 _RATE = 48000
+# QAudioSink pull buffer. processedUSecs() counts samples *pulled into this
+# buffer*, not samples the speaker has emitted, so the visual clock built on it
+# leads the audible sound by roughly the buffer's fill. Qt's default on some
+# backends is ~500 ms (e.g. USB headsets), which puts the picture/c3d a quarter
+# second ahead of the clap. A small buffer bounds that lead (and shrinks the
+# coarse update step, smoothing the clock) while staying large enough that the
+# cheap numpy mix never underruns.
+_BUFFER_MS = 100
 
 
 def played_position_s(origin_s: float, processed_us: float, base_us: float = 0.0) -> float:
@@ -114,6 +122,9 @@ class AudioEngine(QObject):
             fmt.setChannelCount(1)
             fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
             self._sink = QAudioSink(out, fmt)
+            # 2 bytes/sample, mono: bound the pull buffer so the played-clock
+            # doesn't lead the speaker by the backend's (large) default fill.
+            self._sink.setBufferSize(int(_RATE * 2 * _BUFFER_MS / 1000))
             self._dev = _MixDevice(self)
             self._dev.open(QIODevice.OpenModeFlag.ReadOnly)
         except Exception as exc:  # noqa: BLE001

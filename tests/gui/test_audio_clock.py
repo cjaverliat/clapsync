@@ -27,6 +27,16 @@ class FakeSink:
         self.started = False
 
 
+class _NoTimer:
+    """Stub for the engine's publish timer (no QApplication in this test)."""
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
 def _engine_with(sink: FakeSink) -> AudioEngine:
     """An AudioEngine wired to a fake sink, no real audio device."""
     eng = AudioEngine.__new__(AudioEngine)
@@ -38,6 +48,7 @@ def _engine_with(sink: FakeSink) -> AudioEngine:
     eng.enabled = True
     eng._sink = sink
     eng._dev = object()
+    eng._timer = _NoTimer()
     return eng
 
 

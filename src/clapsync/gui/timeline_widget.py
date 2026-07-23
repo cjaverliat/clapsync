@@ -7,7 +7,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QEvent, QPointF, QRectF, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetricsF, QPainter, QPalette, QPen, QBrush, QPainterPath,
-    QPolygonF,
+    QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import QInputDialog, QScrollBar, QWidget
 
@@ -241,9 +241,15 @@ class TimelineWidget(QWidget):
         self._tracks: list[TrackState] = []
         self._track_waveforms: dict[int, np.ndarray] = {}  # track index -> mono
         self._wave_cache: dict[int, tuple] = {}  # index -> (sig, x0, peaks)
+        self._wave_version: int = 0  # bumped when the waveform set changes
         # (track index, shared seconds, is_selected, kind) kind: sound|movement
         self._clap_markers: list[tuple[int, float, bool, str]] = []
         self._playhead_s: float = 0.0
+        # Everything except the playhead is static during playback: cache it to a
+        # pixmap so a 60 Hz playhead move blits instead of re-drawing every
+        # waveform. Rebuilt only when _static_signature changes (see paintEvent).
+        self._static_pixmap: QPixmap | None = None
+        self._static_sig: tuple | None = None
         self._zoom: float = 100.0   # px per second
         self._scroll_x: float = _SCROLL_MARGIN  # pixel x of time=0
         self._scroll_y: float = 0.0  # vertical scroll offset in pixels
@@ -319,14 +325,31 @@ class TimelineWidget(QWidget):
 
     # ------------------------------------------------------------------ paint
 
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    def _static_signature(self) -> tuple:
+        """Everything the cached static pixmap depends on — but NOT the playhead.
 
+        When this is unchanged the pixmap is reused, so a playhead move only
+        re-blits. Subclasses extend it (super() + their own state).
+        """
+        return (
+            self.width(), self.height(),
+            round(self._zoom, 4),
+            round(self._scroll_x, 2), round(self._scroll_y, 2),
+            self._is_dark(), self._vscroll.isVisible(),
+            self._wave_version,
+            tuple(
+                (t.index, round(t.offset_s, 4), round(t.duration_s, 4),
+                 t.locked, t.muted, t.kind, t.warn)
+                for t in self._tracks
+            ),
+            tuple(self._clap_markers),
+        )
+
+    def _paint_static(self, painter: QPainter) -> None:
+        """Draw every layer except the playhead (the cached content)."""
         t = self._theme()
         w = self._content_w()
         h = self.height() - SCROLLBAR_H  # don't paint over the scrollbar
-
         track_area_h = h - HEADER_H
 
         painter.fillRect(0, HEADER_H, w, track_area_h, t["track_area_bg"])
@@ -349,8 +372,30 @@ class TimelineWidget(QWidget):
         self._draw_clap_markers(painter)
         painter.restore()
 
-        self._draw_playhead(painter, h)
+    def _ensure_static_pixmap(self) -> None:
+        sig = self._static_signature()
+        dpr = self.devicePixelRatioF()
+        want = (max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
+        have = self._static_pixmap
+        if (have is not None and self._static_sig == sig
+                and (have.width(), have.height()) == want):
+            return
+        pixmap = QPixmap(want[0], want[1])
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_static(painter)
+        painter.end()
+        self._static_pixmap = pixmap
+        self._static_sig = sig
 
+    def paintEvent(self, event) -> None:
+        self._ensure_static_pixmap()
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._static_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._draw_playhead(painter, self.height() - SCROLLBAR_H)
         painter.end()
 
     def set_clap_markers(
@@ -487,6 +532,7 @@ class TimelineWidget(QWidget):
         """Provide mono samples to render inside each track's clip bar."""
         self._track_waveforms = dict(waveforms)
         self._wave_cache.clear()
+        self._wave_version += 1  # invalidate the static pixmap
         self.update()
 
     def _draw_track_waveform(
@@ -728,6 +774,13 @@ class SyncTrimTimelineWidget(TimelineWidget):
             self._trim_end_s   = total
         self._playhead_s = self._trim_start_s
         self.update()
+
+    def _static_signature(self) -> tuple:
+        # The trim overlay/handles live in the cached static layer, so a trim
+        # change must invalidate the pixmap too.
+        return super()._static_signature() + (
+            round(self._trim_start_s, 4), round(self._trim_end_s, 4),
+        )
 
     def get_trim(self) -> tuple[float, float]:
         return self._trim_start_s, self._trim_end_s

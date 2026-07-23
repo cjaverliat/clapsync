@@ -41,6 +41,7 @@ from clapsync.gui import icons
 from clapsync.gui.audio_engine import AudioEngine
 from clapsync.gui.c3d_preview import C3DMarkerPreviewWidget
 from clapsync.gui.export_dialog import ExportDialog, fmt_time
+from clapsync.gui.playback_clock import slew_clock
 from clapsync.gui.video_player import VideoPlayerWidget, VideoGroupWorker
 from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
 from clapsync.gui.track_panel import TrackHeaderPanel
@@ -95,12 +96,13 @@ class SyncEditorWindow(QMainWindow):
         self._seek_gen: int = 0
         self._video_eof_pending: bool = False
         self._muted: list[bool] = []
-        # Smooth-render clock: interpolate the audio played-clock on a steady GUI
+        # Smooth-render clock: track the audio played-clock on a steady GUI
         # timer so the playhead and c3d preview glide (like the video, which
-        # interpolates in its decode thread) instead of stepping on the coarse,
-        # jittery audio-tick cadence. Anchors re-lock on play/seek.
-        self._clk_anchor: float | None = None
-        self._perf_anchor: float = 0.0
+        # tracks the same master in its decode thread) instead of stepping on
+        # the coarse, jittery audio-tick cadence. None means "re-lock on the
+        # next tick" (set on play/seek); slew_clock then keeps it smooth.
+        self._render_clock: float | None = None
+        self._render_last_perf: float = 0.0
 
         for path in video_paths:
             logger.debug("probe: %s", path.name)
@@ -382,25 +384,28 @@ class SyncEditorWindow(QMainWindow):
         self._render_timer.timeout.connect(self._on_render_tick)
 
     def _render_pos(self) -> float:
-        """Interpolated audio played-position: smooth between coarse clock ticks.
+        """Tracked audio played-position: smooth between coarse clock ticks.
 
-        Runs the GUI perf-counter forward from the last audio anchor and snaps
-        back only when it diverges past ~50 ms, so the playhead and c3d glide
-        yet stay locked to the sound (and hold at the start while the audio
-        buffer primes and clock_s sits at its origin).
+        Feeds the GUI perf-counter forward and slews toward the audio
+        played-clock (see playback_clock.slew_clock), so the playhead and c3d
+        glide yet stay locked to the sound without the periodic jump a hard
+        re-anchor caused. A large jump (a seek) snaps in one step; on a re-lock
+        the first tick adopts the clock's current value.
         """
         now = time.perf_counter()
         target = self._audio.clock_s
-        if self._clk_anchor is None or abs(
-            (self._clk_anchor + (now - self._perf_anchor)) - target
-        ) > 0.05:
-            self._clk_anchor, self._perf_anchor = target, now
-        return self._clk_anchor + (now - self._perf_anchor)
+        if self._render_clock is None:
+            self._render_clock, self._render_last_perf = target, now
+            return target
+        dt = now - self._render_last_perf
+        self._render_last_perf = now
+        self._render_clock = slew_clock(self._render_clock, target, dt)
+        return self._render_clock
 
     def _start_render(self) -> None:
         """Begin smooth visual updates from the audio clock (audio playback only)."""
         if self._audio.enabled:
-            self._clk_anchor = None  # re-lock to wherever the audio clock is now
+            self._render_clock = None  # re-lock to wherever the audio clock is now
             self._render_timer.start()
 
     def _stop_render(self) -> None:
@@ -653,7 +658,7 @@ class SyncEditorWindow(QMainWindow):
         global_s = max(self._trim_start, min(self._trim_end, global_s))
         was_playing = self._is_playing
         self._global_pos = global_s
-        self._clk_anchor = None  # re-lock the smooth-render clock after the jump
+        self._render_clock = None  # re-lock the smooth-render clock after the jump
         self._sync_seek_all(global_s)
         if was_playing and self._group_worker is not None:
             self._group_worker.cmd("play")

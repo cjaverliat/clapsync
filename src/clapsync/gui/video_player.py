@@ -25,6 +25,7 @@ from framepipe import (
 )
 
 from clapsync.app.decode import ensure_preview_proxy
+from clapsync.gui.playback_clock import slew_clock
 
 # Global playback frame rate; every track resamples to this grid.
 _FPS = 30.0
@@ -152,12 +153,13 @@ class VideoGroupWorker(QObject):
         offsets: list[float] = []
         t0 = 0.0
         base_idx = 0  # group tick index playback started from
-        # Audio-slave clock: interpolate smoothly on this thread's perf_counter,
-        # re-anchoring to the audio played-clock only when it drifts. Sampling
+        # Audio-slave clock: feed this thread's perf_counter forward and slew
+        # toward the audio played-clock (see playback_clock.slew_clock). Sampling
         # audio.clock_s directly every loop would inherit the GUI timer's coarse,
-        # jittery 30 Hz cadence and stutter the video.
-        aud_anchor: float | None = None  # audio seconds at the last re-anchor
-        perf_anchor = 0.0                # perf_counter at the last re-anchor
+        # jittery 30 Hz cadence and stutter the video; the same slew the GUI
+        # render loop uses keeps the picture locked to the playhead and c3d.
+        aud_clock: float | None = None   # tracked audio seconds; None = re-lock
+        aud_last_perf = 0.0              # perf_counter at the last slew
 
         try:
             while not self._stop:
@@ -208,7 +210,7 @@ class VideoGroupWorker(QObject):
                                 self.frames_ready.emit(*self._latest, self._seek_gen)
                             self.loading_changed.emit(False)
                         t0, base_idx = time.perf_counter(), group.position if group else 0
-                        aud_anchor = None  # re-lock the audio-slave clock
+                        aud_clock = None  # re-lock the audio-slave clock
 
                     elif op == "update_offsets":
                         new = list(cmd[1])
@@ -221,7 +223,7 @@ class VideoGroupWorker(QObject):
                     elif op == "play":
                         self._playing = True
                         t0, base_idx = time.perf_counter(), group.position if group else 0
-                        aud_anchor = None  # re-lock the audio-slave clock
+                        aud_clock = None  # re-lock the audio-slave clock
 
                     elif op == "pause":
                         self._playing = False
@@ -250,19 +252,21 @@ class VideoGroupWorker(QObject):
                 # display just isn't real-time. The overlay is reserved for true
                 # blocking (a seek), emitted around seek_to_index above.
                 if self._audio_master and self._audio is not None:
-                    # Chase the sound, but smoothly: run a local perf_counter
-                    # clock and only snap it back to the audio played-clock when
-                    # they diverge past ~50 ms. Between snaps the display advances
-                    # continuously, so motion is fluid; the snap keeps it locked
-                    # to what's audible (and holds at the start until audio, which
-                    # sits at its origin while the buffer primes, begins to move).
+                    # Chase the sound, but smoothly: feed a local perf_counter
+                    # clock forward and slew it toward the audio played-clock.
+                    # Between updates the display advances continuously (fluid
+                    # motion); the slew keeps it locked to what's audible without
+                    # the periodic jump a hard re-anchor caused, and holds at the
+                    # start until audio, sitting at its origin while the buffer
+                    # primes, begins to move. A seek snaps in one step.
                     now = time.perf_counter()
                     target = self._audio.clock_s
-                    if aud_anchor is None or abs(
-                        (aud_anchor + (now - perf_anchor)) - target
-                    ) > 0.05:
-                        aud_anchor, perf_anchor = target, now
-                    disp_tick = round((aud_anchor + (now - perf_anchor)) * _FPS)
+                    if aud_clock is None:
+                        aud_clock, aud_last_perf = target, now
+                    else:
+                        aud_clock = slew_clock(aud_clock, target, now - aud_last_perf)
+                        aud_last_perf = now
+                    disp_tick = round(aud_clock * _FPS)
                 else:
                     now = time.perf_counter()
                     disp_tick = base_idx + round((now - t0) * _FPS)
