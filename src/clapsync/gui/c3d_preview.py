@@ -68,11 +68,17 @@ class C3DMarkerPreviewWidget(QWidget):
         """Median per-frame marker span — the clapperboard's size, not travel."""
         pts = self._points[:, subset] if subset else self._points
         mask = self._valid[:, subset] if subset else self._valid
+        # Reduce only over frames with at least one valid marker; an all-invalid
+        # frame is an all-NaN slice that nanmin/nanmax warn on.
+        pts = pts[mask.any(axis=1)]
+        mask = mask[mask.any(axis=1)]
+        if not mask.size:
+            return 1.0
         p = np.where(mask[:, :, None], pts, np.nan)
         lo = np.nanmin(p, axis=1)
         hi = np.nanmax(p, axis=1)
         span = np.nanmax(hi - lo, axis=1)
-        extent = float(np.nanmedian(span[np.isfinite(span)])) if span.size else 0.0
+        extent = float(np.nanmedian(span)) if span.size else 0.0
         return extent or 1.0
 
     def _mean_center(self, subset: list[int] | None) -> np.ndarray:
