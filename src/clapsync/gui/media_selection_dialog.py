@@ -76,7 +76,7 @@ class MediaSelectionDialog(QDialog):
             "Select Media Files",
             "",
             "Media Files (*.mp4 *.mov *.avi *.mkv *.mts *.m2ts *.webm *.flv *.wmv "
-            "*.wav *.mp3 *.flac *.m4a *.aac *.c3d);;All Files (*)",
+            "*.wav *.mp3 *.flac *.m4a *.aac *.c3d *.fbx);;All Files (*)",
         )
         existing = {self._list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self._list.count())}
         for p in paths:

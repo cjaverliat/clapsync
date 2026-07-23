@@ -80,6 +80,13 @@ def _consolidate_actions(bpy) -> None:
     slot per object, so merging them collapses the export to a single scene bake
     (about an order of magnitude faster on a full marker set) with identical
     animation. No-op on the legacy (non-slotted) action model or a lone action.
+
+    Only the simple case a mocap capture produces is merged: every animated
+    object drives exactly one single-slot action, no two objects share an
+    action, no action is unowned (an extra take), and nothing animates through
+    the NLA. Any other structure is left untouched so it exports the slow but
+    correct per-action way rather than risk dropping a take or mis-binding a
+    slot — being wrong is never worth the speed.
     """
     animated = [
         ob for ob in bpy.data.objects
@@ -90,6 +97,19 @@ def _consolidate_actions(bpy) -> None:
     base = animated[0].animation_data.action
     if not getattr(base, "layers", None) or not hasattr(base, "slots"):
         return  # legacy action model: nothing to consolidate into
+
+    actions = list(bpy.data.actions)
+    active = {ob.animation_data.action for ob in animated}
+    with_anim = [ob for ob in bpy.data.objects if ob.animation_data]
+    unexpected = (
+        len(active) != len(animated)        # two objects share an action
+        or len(actions) != len(active)      # an unowned action (extra take)
+        or any(len(a.slots) != 1 for a in actions)
+        or any(ob.animation_data.nla_tracks for ob in with_anim)
+    )
+    if unexpected:
+        return  # not the simple mocap case — fall back to per-action export
+
     strip = base.layers[0].strips[0]
     orphans = []
     for obj in animated[1:]:
