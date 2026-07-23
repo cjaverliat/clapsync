@@ -79,6 +79,10 @@ class VideoGroupWorker(QObject):
         self._seek_gen: int = 0
         # Shared between the decode thread (writer) and the emit loop (reader).
         self._latest: tuple[list[np.ndarray | None], float] | None = None
+        # Signals bound for the GUI are queued here by the decode thread and
+        # emitted by run() (the QThread): PySide6 6.8 silently drops queued
+        # signals emitted directly from a non-Qt thread like the decode thread.
+        self._out: queue.Queue = queue.Queue()
         self._playing: bool = False
         self._stop: bool = False
 
@@ -140,9 +144,26 @@ class VideoGroupWorker(QObject):
                 # nothing: the QLabel already shows it. Emit rate now tracks
                 # decode rate, so a slow decoder degrades motion instead of
                 # drowning the event loop.
-                if self._playing and cur is not None and cur is not last:
+                # Emit any new frame from *this* (QThread) context — including
+                # the one-shot seek/first frame produced while paused. The seek
+                # handler runs on the raw python decode thread, and PySide6 6.8
+                # drops queued signals emitted from a non-Qt thread; routing all
+                # emits through here (the QThread) makes them deliver. A stale
+                # frame is never re-emitted (cur is not last), so a paused,
+                # un-seeked worker stays quiet.
+                if cur is not None and cur is not last:
                     self.frames_ready.emit(cur[0], cur[1], self._seek_gen)
                     last = cur
+                # Deliver the decode thread's loading/eof signals from here too.
+                while True:
+                    try:
+                        kind, *payload = self._out.get_nowait()
+                    except queue.Empty:
+                        break
+                    if kind == "loading":
+                        self.loading_changed.emit(payload[0])
+                    elif kind == "eof":
+                        self.eof_reached.emit()
                 QThread.msleep(1)
         finally:
             self._stop = True
@@ -176,14 +197,14 @@ class VideoGroupWorker(QObject):
                             group.close()
                         # First open of a high-res mosaic transcodes proxies,
                         # which can take minutes; hold the overlay until ready.
-                        self.loading_changed.emit(True)
+                        self._out.put(("loading", True))
                         try:
                             group = self._open(paths, list(offsets))
                         except Exception:
                             logger.exception("VideoGroupDecoder open failed")
                             group = None
                         finally:
-                            self.loading_changed.emit(False)
+                            self._out.put(("loading", False))
                         self._playing = False
                         self._latest = None
 
@@ -202,13 +223,15 @@ class VideoGroupWorker(QObject):
                                 break
                         self._seek_gen = gen
                         if group is not None:
-                            self.loading_changed.emit(True)
+                            self._out.put(("loading", True))
                             group.seek_to_index(min(round(ts * _FPS), group.num_steps))
                             tick = group.next_tick()
                             if tick is not None:
+                                # Publish for the QThread emit loop to deliver —
+                                # emitting here (python thread) is dropped by
+                                # PySide6 6.8's queued-signal path.
                                 self._latest = (self._convert(tick), tick.pts)
-                                self.frames_ready.emit(*self._latest, self._seek_gen)
-                            self.loading_changed.emit(False)
+                            self._out.put(("loading", False))
                         t0, base_idx = time.perf_counter(), group.position if group else 0
                         aud_clock = None  # re-lock the audio-slave clock
 
@@ -272,7 +295,7 @@ class VideoGroupWorker(QObject):
                     disp_tick = base_idx + round((now - t0) * _FPS)
                 if disp_tick >= group.num_steps and group.position >= group.num_steps:
                     self._playing = False
-                    self.eof_reached.emit()
+                    self._out.put(("eof",))
                     continue
 
                 if group.position <= disp_tick and group.position < group.num_steps:
