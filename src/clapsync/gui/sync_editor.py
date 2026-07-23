@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -94,6 +95,12 @@ class SyncEditorWindow(QMainWindow):
         self._seek_gen: int = 0
         self._video_eof_pending: bool = False
         self._muted: list[bool] = []
+        # Smooth-render clock: interpolate the audio played-clock on a steady GUI
+        # timer so the playhead and c3d preview glide (like the video, which
+        # interpolates in its decode thread) instead of stepping on the coarse,
+        # jittery audio-tick cadence. Anchors re-lock on play/seek.
+        self._clk_anchor: float | None = None
+        self._perf_anchor: float = 0.0
 
         for path in video_paths:
             logger.debug("probe: %s", path.name)
@@ -175,7 +182,10 @@ class SyncEditorWindow(QMainWindow):
 
         slot = 0  # grid position among visual (non-audio) tracks
         for i, info in enumerate(self._video_infos):
-            if info.kind == "audio":
+            # Load a waveform for any track carrying audio — standalone audio
+            # files and video tracks with an audio stream alike — so it renders
+            # in the timeline lane.
+            if info.has_audio:
                 try:
                     wave, _rate = load_audio(info.path, target_rate=16000)
                     self._track_waves[i] = wave.reshape(-1).cpu().numpy()
@@ -183,6 +193,8 @@ class SyncEditorWindow(QMainWindow):
                     logger.warning(
                         "failed to load waveform for %s: %s", info.path.name, exc
                     )
+
+            if info.kind == "audio":
                 continue
 
             cell = QWidget()
@@ -363,6 +375,41 @@ class SyncEditorWindow(QMainWindow):
             )
         )
 
+        # 60 Hz smooth-render timer for the playhead + c3d preview (see
+        # _on_render_tick). Runs only while playing with audio as the clock.
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(16)
+        self._render_timer.timeout.connect(self._on_render_tick)
+
+    def _render_pos(self) -> float:
+        """Interpolated audio played-position: smooth between coarse clock ticks.
+
+        Runs the GUI perf-counter forward from the last audio anchor and snaps
+        back only when it diverges past ~50 ms, so the playhead and c3d glide
+        yet stay locked to the sound (and hold at the start while the audio
+        buffer primes and clock_s sits at its origin).
+        """
+        now = time.perf_counter()
+        target = self._audio.clock_s
+        if self._clk_anchor is None or abs(
+            (self._clk_anchor + (now - self._perf_anchor)) - target
+        ) > 0.05:
+            self._clk_anchor, self._perf_anchor = target, now
+        return self._clk_anchor + (now - self._perf_anchor)
+
+    def _start_render(self) -> None:
+        """Begin smooth visual updates from the audio clock (audio playback only)."""
+        if self._audio.enabled:
+            self._clk_anchor = None  # re-lock to wherever the audio clock is now
+            self._render_timer.start()
+
+    def _stop_render(self) -> None:
+        self._render_timer.stop()
+
+    def _on_render_tick(self) -> None:
+        if self._is_playing:
+            self._on_position_changed(self._render_pos())
+
     def _reference_index(self) -> int:
         """The sync-reference track: the first audio-bearing track, never a c3d.
 
@@ -428,7 +475,7 @@ class SyncEditorWindow(QMainWindow):
             self._sync_seek_all(self._trim_start)
             return
 
-        worker = VideoGroupWorker(use_proxies=self._use_proxies)
+        worker = VideoGroupWorker(use_proxies=self._use_proxies, audio=self._audio)
         thread = QThread(self)
         worker.moveToThread(thread)
 
@@ -451,6 +498,10 @@ class SyncEditorWindow(QMainWindow):
             "_load_all_videos: opening %d video(s) via VideoGroupWorker", len(paths)
         )
         worker.cmd("open", paths, video_offsets)
+        # Slave video decode to the audio played-clock so the picture and the
+        # sound stay locked; without audio, video keeps its own wall clock.
+        if self._audio.enabled:
+            worker.cmd("audio_master", True)
         self._sync_seek_all(self._trim_start)
 
     def _stop_group_worker(self) -> None:
@@ -482,14 +533,13 @@ class SyncEditorWindow(QMainWindow):
         # Reject frames that were emitted before the most recent seek was
         # processed by the worker — their timestamps pre-date the new position.
         if global_ts >= 0.0 and seek_gen >= self._seek_gen:
-            self._on_position_changed(global_ts)
-            # Re-lock audio to the video clock only on *genuine* drift. The
-            # 0.5s threshold clears QAudioSink's normal buffer-latency lead
-            # (position_s() counts samples pulled, ~100-200ms ahead of what's
-            # audible), so this fires rarely — and seek() is now a cheap cursor
-            # move, not a device restart.
-            if self._audio.enabled and abs(global_ts - self._audio.position_s()) > 0.5:
-                self._audio.seek(global_ts)
+            # While playing with audio, the audio played-clock owns the playhead
+            # and the c3d preview (see _on_audio_tick) — the video merely follows
+            # it, so its timestamp must not drive the playhead too, or the two
+            # clocks would fight. Video drives only when there is no audio, or
+            # when paused (a seek needs the frame's own time reflected).
+            if not (self._audio.enabled and self._is_playing):
+                self._on_position_changed(global_ts)
 
     @Slot(bool)
     def _on_loading_changed(self, loading: bool) -> None:
@@ -510,10 +560,13 @@ class SyncEditorWindow(QMainWindow):
         self._video_eof_pending = False
         self._sync_seek_all(self._trim_start)
         self._global_pos = self._trim_start
-        if self._group_worker is not None:
-            self._group_worker.cmd("play")
+        # Start audio first so its clock (clock_s) is live before the video
+        # worker reads it to place its first decoded frame.
         if self._audio.enabled:
             self._audio.play()
+        if self._group_worker is not None:
+            self._group_worker.cmd("play")
+        self._start_render()
 
     def _show_play(self) -> None:
         self._play_btn.setIcon(icons.icon("play"))
@@ -527,6 +580,7 @@ class SyncEditorWindow(QMainWindow):
         """Stop: pause the worker (a no-op at EOF) and reset the play button."""
         self._is_playing = False
         self._video_eof_pending = False
+        self._stop_render()
         if self._group_worker is not None:
             self._group_worker.cmd("pause")
         self._audio.pause()
@@ -555,6 +609,7 @@ class SyncEditorWindow(QMainWindow):
         if self._is_playing:
             self._is_playing = False
             self._video_eof_pending = False
+            self._stop_render()
             if self._group_worker is not None:
                 self._group_worker.cmd("pause")
             self._audio.pause()
@@ -565,10 +620,12 @@ class SyncEditorWindow(QMainWindow):
                 self._sync_seek_all(self._trim_start)
                 self._global_pos = self._trim_start
             self._is_playing = True
-            if self._group_worker is not None:
-                self._group_worker.cmd("play")
+            # Audio first so clock_s is live before the worker chases it.
             if self._audio.enabled:
                 self._audio.play()
+            if self._group_worker is not None:
+                self._group_worker.cmd("play")
+            self._start_render()
             self._show_pause()
 
     def _sync_seek_all(self, global_s: float) -> None:
@@ -596,6 +653,7 @@ class SyncEditorWindow(QMainWindow):
         global_s = max(self._trim_start, min(self._trim_end, global_s))
         was_playing = self._is_playing
         self._global_pos = global_s
+        self._clk_anchor = None  # re-lock the smooth-render clock after the jump
         self._sync_seek_all(global_s)
         if was_playing and self._group_worker is not None:
             self._group_worker.cmd("play")
@@ -719,11 +777,10 @@ class SyncEditorWindow(QMainWindow):
         self._audio.set_muted(self._muted)
 
     def _on_audio_tick(self, position_s: float) -> None:
-        # The audio engine is the fallback clock: it drives playback state
-        # whenever there is no video (or the video has run dry but audio is
-        # still carrying playback to the trim end). Otherwise video frames
-        # (which arrive far more frequently) are the master clock.
-        if not self._players or self._video_eof_pending:
+        # Audio is the master clock while playing. Visuals normally ride the
+        # smooth 60 Hz render timer (which interpolates this same clock); this
+        # stays only as a fallback for when that timer isn't running.
+        if self._is_playing and not self._render_timer.isActive():
             self._on_position_changed(position_s)
 
     @Slot(float)

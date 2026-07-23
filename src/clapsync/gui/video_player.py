@@ -66,9 +66,14 @@ class VideoGroupWorker(QObject):
     loading_changed = Signal(bool)
     eof_reached = Signal()
 
-    def __init__(self, use_proxies: bool = False) -> None:
+    def __init__(self, use_proxies: bool = False, audio: Any = None) -> None:
         super().__init__()
         self._use_proxies: bool = use_proxies
+        # When audio is the master clock, the decode thread chases audio.clock_s
+        # (a plain float, GIL-safe to read here) instead of its own wall clock,
+        # so displayed video and the audible sound stay locked together.
+        self._audio: Any = audio
+        self._audio_master: bool = False
         self._cmds: queue.Queue = queue.Queue()
         self._seek_gen: int = 0
         # Shared between the decode thread (writer) and the emit loop (reader).
@@ -147,6 +152,12 @@ class VideoGroupWorker(QObject):
         offsets: list[float] = []
         t0 = 0.0
         base_idx = 0  # group tick index playback started from
+        # Audio-slave clock: interpolate smoothly on this thread's perf_counter,
+        # re-anchoring to the audio played-clock only when it drifts. Sampling
+        # audio.clock_s directly every loop would inherit the GUI timer's coarse,
+        # jittery 30 Hz cadence and stutter the video.
+        aud_anchor: float | None = None  # audio seconds at the last re-anchor
+        perf_anchor = 0.0                # perf_counter at the last re-anchor
 
         try:
             while not self._stop:
@@ -197,6 +208,7 @@ class VideoGroupWorker(QObject):
                                 self.frames_ready.emit(*self._latest, self._seek_gen)
                             self.loading_changed.emit(False)
                         t0, base_idx = time.perf_counter(), group.position if group else 0
+                        aud_anchor = None  # re-lock the audio-slave clock
 
                     elif op == "update_offsets":
                         new = list(cmd[1])
@@ -209,9 +221,13 @@ class VideoGroupWorker(QObject):
                     elif op == "play":
                         self._playing = True
                         t0, base_idx = time.perf_counter(), group.position if group else 0
+                        aud_anchor = None  # re-lock the audio-slave clock
 
                     elif op == "pause":
                         self._playing = False
+
+                    elif op == "audio_master":
+                        self._audio_master = bool(cmd[1])
 
                     elif op == "stop":
                         self._stop = True
@@ -233,8 +249,23 @@ class VideoGroupWorker(QObject):
                 # motion — no "loading" overlay: frames are advancing, the
                 # display just isn't real-time. The overlay is reserved for true
                 # blocking (a seek), emitted around seek_to_index above.
-                now = time.perf_counter()
-                disp_tick = base_idx + round((now - t0) * _FPS)
+                if self._audio_master and self._audio is not None:
+                    # Chase the sound, but smoothly: run a local perf_counter
+                    # clock and only snap it back to the audio played-clock when
+                    # they diverge past ~50 ms. Between snaps the display advances
+                    # continuously, so motion is fluid; the snap keeps it locked
+                    # to what's audible (and holds at the start until audio, which
+                    # sits at its origin while the buffer primes, begins to move).
+                    now = time.perf_counter()
+                    target = self._audio.clock_s
+                    if aud_anchor is None or abs(
+                        (aud_anchor + (now - perf_anchor)) - target
+                    ) > 0.05:
+                        aud_anchor, perf_anchor = target, now
+                    disp_tick = round((aud_anchor + (now - perf_anchor)) * _FPS)
+                else:
+                    now = time.perf_counter()
+                    disp_tick = base_idx + round((now - t0) * _FPS)
                 if disp_tick >= group.num_steps and group.position >= group.num_steps:
                     self._playing = False
                     self.eof_reached.emit()

@@ -180,11 +180,9 @@ def align_media(
         is_cancelled=is_cancelled,
     )
 
-    if status is not None:
-        status("Detecting clapperboard…")
     mocap_offsets, mocap_conf, mocap_warn = bridge_mocap_offsets(
         av_media, av_align, [media[i] for i in mocap_idx], mocap_idx,
-        marker_choices, target_rate=target_rate or 16000,
+        marker_choices, target_rate=target_rate or 16000, status=status,
     )
 
     offsets = [0.0] * n

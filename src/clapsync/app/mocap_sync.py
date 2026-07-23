@@ -16,6 +16,7 @@ records a warning, rather than guessing.
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 import numpy as np
 
@@ -129,6 +130,7 @@ def bridge_mocap_offsets(
     mocap_indices: list[int],
     marker_choices: MarkerChoices | None,
     target_rate: int = 16000,
+    status: Callable[[str], None] | None = None,
 ) -> tuple[list[float], list[float], list[str]]:
     """Compute shared-timeline offsets for the mocap tracks.
 
@@ -145,13 +147,18 @@ def bridge_mocap_offsets(
     Returns:
         (offsets, confidence, warnings) parallel to ``mocap_media``.
     """
+    if status is not None:
+        status("Detecting clapperboard sound…")
     anchor = detect_sound_anchor(av_media, av_align, target_rate)
     offsets: list[float] = []
     confidence: list[float] = []
     warnings: list[str] = []
 
+    total = len(mocap_media)
     for local, info in enumerate(mocap_media):
         name = info.path.name
+        if status is not None:
+            status(f"Aligning motion capture {local + 1}/{total}: {name}…")
         if anchor is None:
             offsets.append(0.0)
             confidence.append(0.0)

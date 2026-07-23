@@ -12,6 +12,18 @@ logger = logging.getLogger(__name__)
 _RATE = 48000
 
 
+def played_position_s(origin_s: float, processed_us: float, base_us: float = 0.0) -> float:
+    """Content seconds actually audible, from the sink's played-time counter.
+
+    origin_s is the content time at which the current sink.start() began;
+    processed_us is QAudioSink.processedUSecs() (microseconds actually pushed to
+    the device since that start), base_us the counter value at the last in-play
+    re-anchor. This tracks what the speaker is emitting — unlike the pull cursor,
+    which leads by the whole ring buffer and primes by a random amount per run.
+    """
+    return origin_s + (processed_us - base_us) / 1_000_000.0
+
+
 def mix_block(
     tracks: list[np.ndarray],
     offsets: list[float],
@@ -78,6 +90,15 @@ class AudioEngine(QObject):
         self._offsets: list[float] = []
         self._muted: list[bool] = []
         self._cursor = 0            # samples from time 0 on the shared timeline
+        self._playing = False
+        # Anchors for the played-time clock: content seconds where the current
+        # sink.start() began, and the processedUSecs baseline for in-play seeks.
+        self._origin_s = 0.0
+        self._base_us = 0.0
+        # Last computed played position (seconds), published for the video worker
+        # to chase on the decode thread — a plain float read is GIL-safe, so it
+        # never touches the QAudioSink from another thread.
+        self.clock_s = 0.0
         self.enabled = True
         self._sink = None
         self._dev = None
@@ -98,12 +119,18 @@ class AudioEngine(QObject):
         except Exception as exc:  # noqa: BLE001
             logger.warning("audio preview disabled (%s)", exc)
             self.enabled = False
-        # Emit position on a light timer while playing.
+        # Refresh the clock and emit position on a light timer while playing.
+        # ~33 ms (≈30 Hz) matches the video display grid: fine enough for the
+        # worker (which chases clock_s) and the c3d preview to track the sound,
+        # without flooding the GUI with preview repaints. Sync accuracy comes
+        # from the clock being *correct*, not from a high tick rate.
         self._timer = QTimer(self)
-        self._timer.setInterval(50)
-        self._timer.timeout.connect(
-            lambda: self.position_changed.emit(self.position_s())
-        )
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+
+    def _tick(self) -> None:
+        self.clock_s = self.position_s()
+        self.position_changed.emit(self.clock_s)
 
     def set_tracks(self, waveforms: list[torch.Tensor], offsets: list[float]) -> None:
         # Mono float32 numpy at _RATE (waveforms already decoded at 48k).
@@ -129,23 +156,49 @@ class AudioEngine(QObject):
         return block
 
     def position_s(self) -> float:
+        """Where the sound actually is, in shared-timeline seconds.
+
+        While playing this is the sink's *played* time, not the pull cursor:
+        the cursor leads by the whole ring buffer (primed by a random amount
+        each run), which is exactly what made the clap drift out of sync with
+        the c3d frame between playbacks.
+        """
+        if self._playing and self._sink is not None:
+            return played_position_s(
+                self._origin_s, self._sink.processedUSecs(), self._base_us
+            )
         return self._cursor / _RATE
 
     def seek(self, global_s: float) -> None:
-        # Just move the cursor. A running sink picks it up on its next pull
-        # (a few ms later) — do NOT stop/start the sink here: restarting the
-        # audio device is expensive and, if called per video frame by the
-        # editor's drift corrector, tanks playback. play() owns starting.
+        # Move the pull cursor. A running sink picks it up on its next pull;
+        # do NOT stop/start the sink (a device restart is expensive). If we are
+        # playing, re-anchor the played-time clock so position_s stays correct
+        # (processedUSecs keeps counting across a cursor move — it only resets
+        # on start()).
         self._cursor = max(0, int(round(global_s * _RATE)))
+        if self._playing and self._sink is not None:
+            self._origin_s = self._cursor / _RATE
+            self._base_us = self._sink.processedUSecs()
+            self.clock_s = self._origin_s
 
     def play(self) -> None:
         if not self.enabled or self._sink is None:
             return
+        # processedUSecs resets to 0 on start(), so anchor the clock at the
+        # cursor's content time with a zero baseline.
+        self._origin_s = self._cursor / _RATE
+        self._base_us = 0.0
+        self.clock_s = self._origin_s
+        self._playing = True
         self._sink.start(self._dev)
         self._timer.start()
 
     def pause(self) -> None:
         if not self.enabled or self._sink is None:
             return
+        # Capture the played position before stopping so the cursor no longer
+        # holds the buffer-lead — resume then starts from what was audible.
+        self._cursor = max(0, int(round(self.position_s() * _RATE)))
+        self._playing = False
         self._sink.stop()
         self._timer.stop()
