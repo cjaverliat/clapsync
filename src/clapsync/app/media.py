@@ -18,12 +18,28 @@ class MediaInfo:
     path: Path
     duration: float
     has_audio: bool
-    kind: Literal["audio", "video", "mocap"]
+    kind: Literal["audio", "video", "mocap", "fbx"]
     sample_rate: int | None = None
     width: int | None = None
     height: int | None = None
     fps: float | None = None
     point_rate: float | None = None
+
+
+def track_family(kind: str) -> Literal["av", "mocap"]:
+    """Group a track kind into a family.
+
+    "av" (audio, video) tracks drive audio sync — they are reference-eligible,
+    MFCC-aligned, and define the trim window. "mocap" (c3d, fbx) tracks carry no
+    audio and cannot self-sync; they are placed by the clapperboard link (the
+    c3d against the A/V clap, and each fbx enslaved to its c3d).
+    """
+    return "av" if kind in ("audio", "video") else "mocap"
+
+
+def is_av(kind: str) -> bool:
+    """True for audio/video tracks — the ones that drive audio sync."""
+    return track_family(kind) == "av"
 
 
 def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
