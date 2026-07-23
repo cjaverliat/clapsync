@@ -60,6 +60,24 @@ next session doesn't rediscover them.
 
 All five objectives are complete; the feature is wired end to end.
 
+## Export-perf fix (2026-07-23, session 2)
+
+`trim_fbx` export was the bottleneck: Blender's FBX exporter bakes the whole
+scene **once per action**, and a mocap fbx imports as one action per object
+(jam_.fbx: 84 — armature + 83 marker empties), so the scene was baked 84 times
+(>10 min for a 1260-frame window). Dead ends, all confirmed on jam_.fbx:
+`bake_anim=False` and `use_all_actions=False` export **no** animation (slotted
+actions are invisible to the exporter's single-take path); NLA push-down yields
+an 84² take cross-product (wrong + 758 MB); the FBX SDK has no cross-platform
+py3.13 bindings; conda `assimp` ships only the C++ lib (no CLI/binding).
+
+Fix (`_consolidate_actions`): fold all per-object actions into **one multi-slot
+action** (Blender 4.4+ slotted actions), so the exporter bakes the scene **once**
+— **56 s vs >10 min (~11×)** on the 1260-frame window, lossless, pure bpy, no new
+deps. Correctness confirmed in **world space** (bone + marker positions match
+exactly; the raw root-bone `.location` channel relocates on FBX roundtrip, which
+made an fcurve-channel check misleadingly read 0 — world-space is invariant).
+
 ## Objective 1 — fix the fbx trim boundary (the blocker)
 
 `app/fbx.py::trim_fbx` must trim an fbx animation to the shared export window and

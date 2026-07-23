@@ -70,6 +70,54 @@ def _crop_and_shift(fcurve, lo: int, hi: int, delta: int) -> None:
     fcurve.update()
 
 
+def _consolidate_actions(bpy) -> None:
+    """Fold every object's action into one multi-slot action for fast export.
+
+    Blender's FBX exporter bakes the whole scene once per action, and a mocap
+    fbx imports as one action per object (dozens — armature plus every marker),
+    so the scene is baked dozens of times: the export dominates and scales with
+    the object count. Blender 4.4+ slotted actions let a single action carry one
+    slot per object, so merging them collapses the export to a single scene bake
+    (about an order of magnitude faster on a full marker set) with identical
+    animation. No-op on the legacy (non-slotted) action model or a lone action.
+    """
+    animated = [
+        ob for ob in bpy.data.objects
+        if ob.animation_data and ob.animation_data.action
+    ]
+    if len(animated) < 2:
+        return
+    base = animated[0].animation_data.action
+    if not getattr(base, "layers", None) or not hasattr(base, "slots"):
+        return  # legacy action model: nothing to consolidate into
+    strip = base.layers[0].strips[0]
+    orphans = []
+    for obj in animated[1:]:
+        anim = obj.animation_data
+        source = anim.action
+        if source is base:
+            continue
+        slot = base.slots.new("OBJECT", obj.name)
+        dst_bag = strip.channelbag(slot, ensure=True)
+        src_bag = source.layers[0].strips[0].channelbag(anim.action_slot)
+        for src_fcurve in src_bag.fcurves:
+            dst_fcurve = dst_bag.fcurves.new(
+                src_fcurve.data_path, index=src_fcurve.array_index,
+            )
+            n = len(src_fcurve.keyframe_points)
+            if n:
+                dst_fcurve.keyframe_points.add(n)
+                co = np.empty(n * 2, dtype=np.float64)
+                src_fcurve.keyframe_points.foreach_get("co", co)
+                dst_fcurve.keyframe_points.foreach_set("co", co)
+            dst_fcurve.update()
+        anim.action = base
+        anim.action_slot = slot
+        orphans.append(source)
+    for action in orphans:
+        bpy.data.actions.remove(action)
+
+
 def _has_keys(action) -> bool:
     """True if any fcurve of ``action`` carries a keyframe."""
     return any(len(fc.keyframe_points) for fc in _iter_fcurves(action))
@@ -135,8 +183,10 @@ def trim_fbx(
     indices are taken relative to the animation's own start frame (mocap fbx
     commonly begin at frame 2, not 1).
 
-    Each action's manual frame range is set to the full output window so the FBX
-    exporter's per-action bake samples the shifted keys plus the CONSTANT-held
+    Per-object actions are first consolidated into one multi-slot action (see
+    ``_consolidate_actions``) so the exporter bakes the scene once, not once per
+    object. Each action's manual frame range is then set to the full output
+    window so the exporter's bake samples the shifted keys plus the CONSTANT-held
     pads (the default ``bake_anim_use_all_actions`` bakes each action over its
     own range; ``use_frame_range`` overrides that range and is honored).
 
@@ -148,6 +198,7 @@ def trim_fbx(
     """
     local_start, local_end, pad_start, pad_end = window
     bpy = _reset_and_import(Path(src))
+    _consolidate_actions(bpy)
 
     src0 = int(round(_anim_frame_range(bpy)[0]))
     f0 = round(local_start * fps)
