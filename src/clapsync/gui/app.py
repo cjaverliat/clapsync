@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from clapsync import diagnostics
 from clapsync.gui.media_selection_dialog import MediaSelectionDialog
+from clapsync.gui.progress import startup_progress
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +119,9 @@ def main() -> None:
 
     log_file = diagnostics.configure_logging(verbose=args.verbose)
     diagnostics.install_excepthook(on_exception=_report_crash)
-    diagnostics.log_startup_context()
-    logger.info("logging to %s", log_file)
 
+    # Create the QApplication before the environment warm-up so a window can
+    # exist during it (and so a crash there can raise a dialog).
     app = QApplication([sys.argv[0], *qt_args])
     diagnostics.install_qt_message_handler()
 
@@ -139,33 +140,46 @@ def main() -> None:
     _sig_timer.start(200)
     _sig_timer.timeout.connect(lambda: None)
 
+    # log_startup_context imports torch and probes CUDA (~3s of blank window).
+    with startup_progress() as status:
+        status("Checking environment…")
+        diagnostics.log_startup_context()
+    logger.info("logging to %s", log_file)
+
     sel = MediaSelectionDialog()
     if sel.exec() != QDialog.DialogCode.Accepted:
         sys.exit(0)
 
     video_paths = sel.get_media_paths()
 
-    # Probe every input once, here on the main thread — fbx probing runs bpy,
-    # which is main-thread-only. The result is reused for logging and for offset
-    # computation so the worker thread never re-probes (no bpy off-thread, and
-    # no second multi-second fbx load).
-    from clapsync.app.media import probe
-    try:
-        media = [probe(p) for p in video_paths]
-    except Exception as exc:  # noqa: BLE001 — surface a bad input, don't crash
-        QMessageBox.critical(None, "Error", f"Could not read an input file:\n{exc}")
+    # Two silent stages behind one busy dialog: probing every input (fbx probing
+    # runs bpy — main-thread-only — so it happens here and the result is reused
+    # for logging and offset computation, no worker re-probe), then loading the
+    # decode stack (torch/torchaudio/framepipe, kept out of module scope so the
+    # selection dialog above paints instantly).
+    probe_error: Exception | None = None
+    media: list | None = None
+    with startup_progress() as status:
+        status("Probing inputs…")
+        from clapsync.app.media import probe
+        try:
+            media = [probe(p) for p in video_paths]
+        except Exception as exc:  # noqa: BLE001 — surface a bad input, don't crash
+            media, probe_error = None, exc
+        if media is not None:
+            status("Loading sync engine…")
+            from clapsync.core import LOW_CONFIDENCE
+            from clapsync.gui.sync_editor import SyncEditorWindow
+            from clapsync.gui.workers import (
+                compute_offsets_with_progress,
+                prepare_proxies_with_progress,
+            )
+    if probe_error is not None:
+        QMessageBox.critical(
+            None, "Error", f"Could not read an input file:\n{probe_error}"
+        )
         sys.exit(1)
     diagnostics.log_inputs(video_paths, media=media)
-
-    # Deferred: importing these pulls torch/torchaudio/framepipe (~3s + CUDA
-    # init). Keeping them out of module scope lets the selection dialog above
-    # paint instantly instead of after the whole decode stack loads.
-    from clapsync.core import LOW_CONFIDENCE
-    from clapsync.gui.sync_editor import SyncEditorWindow
-    from clapsync.gui.workers import (
-        compute_offsets_with_progress,
-        prepare_proxies_with_progress,
-    )
 
     marker_choices = _resolve_marker_choices(video_paths)
     alignment = compute_offsets_with_progress(
