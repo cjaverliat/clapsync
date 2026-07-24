@@ -12,8 +12,41 @@ calls. All bpy usage in the project is confined here.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable, TypeVar
 
 import numpy as np
+
+_T = TypeVar("_T")
+
+
+def _run_inline(work: Callable[[], _T]) -> _T:
+    """Default executor: run bpy work in the calling thread."""
+    return work()
+
+
+# All bpy work in this module is submitted through ``_bpy_executor``. bpy is
+# main-thread-only — calling it from a worker thread aborts the process with a
+# Windows access violation (0xC0000005) that bypasses sys.excepthook, so there
+# is no traceback. The CLI/tests run on the main thread and keep the inline
+# default; the GUI installs a marshaller (gui.bpy_bridge) that hops any call
+# made from a worker thread onto the main thread.
+_bpy_executor: Callable[[Callable[[], object]], object] = _run_inline
+
+
+def set_bpy_executor(executor: Callable[[Callable[[], object]], object]) -> None:
+    """Install the executor that runs this module's bpy work.
+
+    The GUI passes a main-thread marshaller so sync/export workers can trigger
+    fbx probing/trimming without touching bpy off the main thread.
+    """
+    global _bpy_executor
+    _bpy_executor = executor
+
+
+def reset_bpy_executor() -> None:
+    """Restore the default inline executor (used by tests)."""
+    global _bpy_executor
+    _bpy_executor = _run_inline
 
 
 def _reset_and_import(path: Path):
@@ -174,12 +207,15 @@ def probe_fbx(path: Path) -> tuple[float, int]:
         (fps, n_frames): animation frames per second and the number of frames
         spanned by the animation (inclusive of both ends).
     """
-    bpy = _reset_and_import(Path(path))
-    scene = bpy.context.scene
-    fps = scene.render.fps / scene.render.fps_base
-    start, end = _anim_frame_range(bpy)
-    n_frames = int(round(end - start)) + 1
-    return float(fps), n_frames
+    def _work() -> tuple[float, int]:
+        bpy = _reset_and_import(Path(path))
+        scene = bpy.context.scene
+        fps = scene.render.fps / scene.render.fps_base
+        start, end = _anim_frame_range(bpy)
+        n_frames = int(round(end - start)) + 1
+        return float(fps), n_frames
+
+    return _bpy_executor(_work)
 
 
 def trim_fbx(
@@ -217,39 +253,43 @@ def trim_fbx(
         fps: Animation frame rate (from ``probe_fbx``).
     """
     local_start, local_end, pad_start, pad_end = window
-    bpy = _reset_and_import(Path(src))
-    _consolidate_actions(bpy)
 
-    src0 = int(round(_anim_frame_range(bpy)[0]))
-    f0 = round(local_start * fps)
-    f1 = round(local_end * fps)
-    pad_front = round(pad_start * fps)
-    total = round((pad_start + (local_end - local_start) + pad_end) * fps)
+    def _work() -> None:
+        bpy = _reset_and_import(Path(src))
+        _consolidate_actions(bpy)
 
-    lo = src0 + f0  # first kept source frame (inclusive)
-    hi = src0 + f1 - 1  # last kept source frame (inclusive)
-    delta = (pad_front + 1) - lo  # shift lo -> output frame pad_front + 1
+        src0 = int(round(_anim_frame_range(bpy)[0]))
+        f0 = round(local_start * fps)
+        f1 = round(local_end * fps)
+        pad_front = round(pad_start * fps)
+        total = round((pad_start + (local_end - local_start) + pad_end) * fps)
 
-    for action in bpy.data.actions:
-        for fcurve in _iter_fcurves(action):
-            _crop_and_shift(fcurve, lo, hi, delta)
-        if hasattr(action, "use_frame_range"):
-            action.use_frame_range = True
-            action.frame_start = 1
-            action.frame_end = total
+        lo = src0 + f0  # first kept source frame (inclusive)
+        hi = src0 + f1 - 1  # last kept source frame (inclusive)
+        delta = (pad_front + 1) - lo  # shift lo -> output frame pad_front + 1
 
-    scene = bpy.context.scene
-    scene.frame_start = 1
-    scene.frame_end = total
-    scene.render.fps = int(round(fps))
-    scene.render.fps_base = 1.0
+        for action in bpy.data.actions:
+            for fcurve in _iter_fcurves(action):
+                _crop_and_shift(fcurve, lo, hi, delta)
+            if hasattr(action, "use_frame_range"):
+                action.use_frame_range = True
+                action.frame_start = 1
+                action.frame_end = total
 
-    bpy.ops.export_scene.fbx(
-        filepath=str(dst),
-        bake_anim=True,
-        bake_anim_use_all_bones=True,
-        bake_anim_step=1.0,
-        # No key reduction: mocap fidelity over file size.
-        bake_anim_simplify_factor=0.0,
-        add_leaf_bones=False,
-    )
+        scene = bpy.context.scene
+        scene.frame_start = 1
+        scene.frame_end = total
+        scene.render.fps = int(round(fps))
+        scene.render.fps_base = 1.0
+
+        bpy.ops.export_scene.fbx(
+            filepath=str(dst),
+            bake_anim=True,
+            bake_anim_use_all_bones=True,
+            bake_anim_step=1.0,
+            # No key reduction: mocap fidelity over file size.
+            bake_anim_simplify_factor=0.0,
+            add_leaf_bones=False,
+        )
+
+    _bpy_executor(_work)

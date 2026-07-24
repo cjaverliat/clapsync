@@ -124,6 +124,14 @@ def main() -> None:
     app = QApplication([sys.argv[0], *qt_args])
     diagnostics.install_qt_message_handler()
 
+    # bpy (Blender) is main-thread-only; the offset and export workers run on
+    # QThreads and touch fbx files, so route app.fbx's bpy work back to the main
+    # thread. Without this, an fbx input silently crashes the process (access
+    # violation, no traceback) the moment a worker calls into bpy.
+    from clapsync.app import fbx
+    from clapsync.gui.bpy_bridge import make_main_thread_executor
+    fbx.set_bpy_executor(make_main_thread_executor(app))
+
     # Allow CTRL+C to quit the Qt event loop.
     signal.signal(signal.SIGINT, lambda *_: app.quit())
     # Qt blocks the GIL; a periodic no-op timer lets Python check for signals.
