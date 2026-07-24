@@ -1,7 +1,8 @@
 # Measured Audible Clock — Design
 
 Date: 2026-07-24
-Status: Proposed
+Status: Superseded by `2026-07-24-qt-native-preview-design.md` — preview moves
+to Qt-native playback, deleting the custom clock this fixes.
 Scope: Layer 1 of the preview A/V-sync work. Independent of, and shippable
 before, the framepipe→Qt mosaic swap (Layer 2, separate spec).
 
