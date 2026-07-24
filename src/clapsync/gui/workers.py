@@ -33,16 +33,18 @@ class OffsetWorker(QObject):
     finished = Signal(object)  # Alignment
     failed = Signal(str)
 
-    def __init__(self, paths: list[Path], marker_choices=None) -> None:
+    def __init__(self, paths: list[Path], marker_choices=None, media=None) -> None:
         super().__init__()
         self._paths = paths
         self._marker_choices = marker_choices
+        self._media = media
 
     @Slot()
     def run(self) -> None:
         try:
             alignment = compute_sync_offsets(
                 self._paths,
+                media=self._media,
                 marker_choices=self._marker_choices,
                 progress=lambda f: self.progress_value.emit(int(f * 1000)),
                 status=lambda s: self.status.emit(s),
@@ -174,19 +176,21 @@ def _run_with_progress(worker, title: str, parent):
 
 
 def compute_offsets_with_progress(
-    paths: list[Path], parent=None, marker_choices=None
+    paths: list[Path], parent=None, marker_choices=None, media=None
 ) -> Alignment | None:
     """Compute sync offsets behind a modal progress dialog.
 
     Args:
         marker_choices: Optional resolved c3d clapperboard marker groups
             (see MarkerSelectionDialog), forwarded to the sync bridge.
+        media: Optional pre-probed MediaInfo (one per path). Probed on the main
+            thread and reused so the worker never re-probes fbx via bpy.
 
     Returns:
         Computed alignment, or None if cancelled or an error occurred.
     """
     result, error = _run_with_progress(
-        OffsetWorker(paths, marker_choices), "Computing Offsets", parent
+        OffsetWorker(paths, marker_choices, media), "Computing Offsets", parent
     )
     if error is not None:
         QMessageBox.critical(parent, "Error", f"Failed to compute offsets:\n{error}")

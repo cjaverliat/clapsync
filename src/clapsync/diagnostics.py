@@ -143,19 +143,28 @@ def log_startup_context() -> None:
     logger.info("%s", _ffmpeg_report())
 
 
-def log_inputs(video_paths: list[Path]) -> None:
+def log_inputs(video_paths: list[Path], media: list | None = None) -> None:
     """Probe and log each selected input (resolution/fps/duration/audio).
 
     A "wrong output" or decode-failure report is far easier to reconstruct with
     the exact source properties on record. A single bad input is logged and
     skipped rather than aborting.
+
+    Args:
+        media: Optional pre-probed MediaInfo (one per path, same order). When
+            given it is logged directly instead of re-probing — the GUI probes
+            once on the main thread (fbx probing runs bpy, main-thread-only) and
+            reuses the result. When None each input is probed here (CLI path).
     """
     logger.info("inputs (%d):", len(video_paths))
-    for path in video_paths:
+    for i, path in enumerate(video_paths):
         try:
-            from clapsync.app.media import probe
+            if media is not None:
+                info = media[i]
+            else:
+                from clapsync.app.media import probe
 
-            info = probe(Path(path))
+                info = probe(Path(path))
             logger.info(
                 "  %s | kind=%s dur=%.3fs %sx%s @%sfps audio=%s",
                 info.path.name,

@@ -144,7 +144,18 @@ def main() -> None:
         sys.exit(0)
 
     video_paths = sel.get_media_paths()
-    diagnostics.log_inputs(video_paths)
+
+    # Probe every input once, here on the main thread — fbx probing runs bpy,
+    # which is main-thread-only. The result is reused for logging and for offset
+    # computation so the worker thread never re-probes (no bpy off-thread, and
+    # no second multi-second fbx load).
+    from clapsync.app.media import probe
+    try:
+        media = [probe(p) for p in video_paths]
+    except Exception as exc:  # noqa: BLE001 — surface a bad input, don't crash
+        QMessageBox.critical(None, "Error", f"Could not read an input file:\n{exc}")
+        sys.exit(1)
+    diagnostics.log_inputs(video_paths, media=media)
 
     # Deferred: importing these pulls torch/torchaudio/framepipe (~3s + CUDA
     # init). Keeping them out of module scope lets the selection dialog above
@@ -158,7 +169,7 @@ def main() -> None:
 
     marker_choices = _resolve_marker_choices(video_paths)
     alignment = compute_offsets_with_progress(
-        video_paths, marker_choices=marker_choices
+        video_paths, marker_choices=marker_choices, media=media
     )
     if alignment is None:
         sys.exit(0)

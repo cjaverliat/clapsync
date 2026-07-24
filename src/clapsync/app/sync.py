@@ -201,6 +201,7 @@ def align_media(
 def compute_sync_offsets(
     paths: list[Path],
     *,
+    media: list[MediaInfo] | None = None,
     reference_index: int = 0,
     refine: Refine = "parabolic",
     target_rate: int | None = 16000,
@@ -213,6 +214,10 @@ def compute_sync_offsets(
 
     Args:
         paths: Input media file paths.
+        media: Optional pre-probed MediaInfo, one per path in order. When given,
+            the probe phase is skipped — the GUI probes on the main thread (fbx
+            probing runs bpy, which is main-thread-only) and reuses the result
+            here so the worker thread never re-probes.
         reference_index: Track whose timeline is the origin (must be A/V; a
             mocap reference falls back to the first A/V track).
         refine: Peak refinement.
@@ -231,13 +236,14 @@ def compute_sync_offsets(
     if is_cancelled is not None and is_cancelled():
         n = len(paths)
         return Alignment([0.0] * n, [0.0] * n, [])
-    media = []
-    for i, p in enumerate(paths):
-        if status is not None:
-            status(f"Probing files ({i + 1}/{len(paths)})…")
-        if progress is not None:
-            progress(i / len(paths))
-        media.append(probe(p))
+    if media is None:
+        media = []
+        for i, p in enumerate(paths):
+            if status is not None:
+                status(f"Probing files ({i + 1}/{len(paths)})…")
+            if progress is not None:
+                progress(i / len(paths))
+            media.append(probe(p))
     if progress is not None:
         progress(1.0)  # probing done; the load phase reports its own 0..1
     return align_media(
