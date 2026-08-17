@@ -35,8 +35,8 @@ SolidCompression=yes
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 
 [InstallDelete]
-; On upgrade, clear the previous env's wheels so an old clapsync/framepipe
-; wheel can't linger beside the new one in the find-links dir.
+; On upgrade, clear the previous env's wheels so an old clapsync wheel
+; can't linger beside the new one in the find-links dir.
 Type: filesandordirs; Name: "{app}\app\wheels"
 
 [Files]

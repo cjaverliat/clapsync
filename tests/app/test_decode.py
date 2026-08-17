@@ -3,14 +3,13 @@ from pathlib import Path
 
 import pytest
 import torch
-from framepipe.metadata import extract_video_metadata
 
 from clapsync.app.decode import (
     ensure_preview_proxy,
     load_audio,
     source_needs_preview_proxy,
 )
-from clapsync.app.media import MediaInfo
+from clapsync.app.media import MediaInfo, probe
 
 
 def _video_info(height: int) -> MediaInfo:
@@ -125,7 +124,7 @@ def test_ensure_preview_proxy_downscales_and_caches_large_source(
     proxy = ensure_preview_proxy(path)
     assert proxy != path
     assert proxy.exists()
-    assert extract_video_metadata(str(proxy)).height == 480
+    assert probe(proxy).height == 480
 
     # Second call is a cache hit: same proxy path, no re-transcode.
     assert ensure_preview_proxy(path) == proxy

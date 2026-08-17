@@ -15,7 +15,7 @@ slate in front of. 👏
 ## Install
 
 clapsync uses [pixi](https://pixi.sh) for its environment (Python, torch,
-framepipe, PyAV, ffmpeg libraries — all handled for you):
+PyAV, ffmpeg libraries — all handled for you):
 
 ```bash
 pixi install
@@ -71,7 +71,7 @@ Install with `pip install clapsync` (numpy + torch + torchaudio only).
 | `common_time_range(durations, offsets)` | The overlap where all clips are present. |
 | `full_time_range(durations, offsets)` | The union spanning every clip. |
 
-### App layer (`clapsync.app`) — requires `clapsync[app]` (framepipe + PyAV)
+### App layer (`clapsync.app`) — requires `clapsync[app]` (PyAV)
 
 | Function / class | What it does |
 |---|---|
@@ -106,14 +106,12 @@ pixi run python examples/auto_sync_trim.py -o synced/ cam_a.mp4 cam_b.mp4
 4. **Export** — trim each clip to that range, pad gaps, and re-encode aligned.
    GPU (NVENC) is used automatically when available, with a CPU fallback.
 
-Media decode/encode runs on [framepipe](https://github.com/cjaverliat/framepipe)
-for video decode and [PyAV](https://github.com/PyAV-Org/PyAV) for audio and
-muxing (both GPU-accelerated where applicable); no `ffmpeg` command-line calls.
+Media probing, decode, encode and muxing all run on
+[PyAV](https://github.com/PyAV-Org/PyAV); no `ffmpeg` command-line calls.
 
 ## Requirements
 
-- A CUDA-capable GPU is recommended — framepipe's `device="cuda:0"` decode and
-  the `h264_nvenc` export path both use it.
+- A CUDA-capable GPU is recommended — the `h264_nvenc` export path uses it.
 
 ## Build a standalone binary
 
@@ -124,8 +122,7 @@ pixi run build-clapsync
 ## Build the Windows installer
 
 Requires [Inno Setup 6](https://jrsoftware.org/isinfo.php)
-(`winget install JRSoftware.InnoSetup`) and a sibling `../framepipe`
-checkout.
+(`winget install JRSoftware.InnoSetup`).
 
 ```bash
 pixi run build-installer
@@ -145,7 +142,7 @@ app" warning on first run — choose **More info → Run anyway**.
 ```
 src/clapsync/
   core/    # pure: MFCC align, time-range math (numpy/torch/torchaudio only)
-  app/     # file I/O, probe, framepipe/PyAV decode/encode, export, sync_and_trim
+  app/     # file I/O, probe, PyAV decode/encode, export, sync_and_trim
   gui/     # PySide6 app (thin wrapper around app layer)
   cli.py   # sync / synctrim commands
 examples/  # runnable API examples

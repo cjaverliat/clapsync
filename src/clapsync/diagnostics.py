@@ -2,7 +2,7 @@
 
 The core (log directory, handler wiring, ``sys.excepthook``) is stdlib-only and
 imports nothing heavy, so it can run at the very top of ``main`` — before torch,
-framepipe or PySide6 load — and still capture an import-time crash. The startup
+av or PySide6 load — and still capture an import-time crash. The startup
 context block and Qt message handler pull those heavier deps lazily, each
 guarded, so a missing optional package never breaks logging itself.
 """
@@ -137,7 +137,7 @@ def log_startup_context() -> None:
     logger.info(
         "python %s | %s", sys.version.split()[0], platform.platform()
     )
-    for name in ("framepipe", "av", "PySide6", "torchaudio", "qtawesome"):
+    for name in ("av", "PySide6", "torchaudio", "qtawesome"):
         logger.info("%s: %s", name, _package_version(name))
     logger.info("%s", _gpu_report())
     logger.info("%s", _ffmpeg_report())

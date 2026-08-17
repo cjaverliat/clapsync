@@ -1,12 +1,11 @@
 # Shipping environment for the Windows installer.
 #
-# Locked by installer/build.py (which first builds clapsync + framepipe
-# wheels into wheels/ — the find-links source); installed on the target by
+# Locked by installer/build.py (which first builds the clapsync wheel
+# into wheels/ — the find-links source); installed on the target by
 # setup_env.cmd via `pixi install --locked`.
 #
 # Version pins for torch/torchaudio/PySide6/qtawesome MUST track
-# [tool.pixi.pypi-dependencies] in ../pyproject.toml; triton-windows tracks
-# [tool.pixi.target.win-64.pypi-dependencies]; the av floor tracks
+# [tool.pixi.pypi-dependencies] in ../pyproject.toml; the av floor tracks
 # [project.optional-dependencies] app.
 
 [workspace]
@@ -27,14 +26,12 @@ index-url = "https://pypi.org/simple"
 find-links = [{ path = "wheels" }]
 
 [pypi-dependencies]
-# clapsync and framepipe resolve to the locally built wheels in wheels/;
-# the committed pixi.lock pins their exact versions.
+# clapsync resolves to the locally built wheel in wheels/; the committed
+# pixi.lock pins its exact version.
 clapsync = "*"
-framepipe = "*"
 torch = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
 torchaudio = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
 av = ">=18"
 c3d = ">=0.5"
 PySide6 = ">=6.8.0,<6.9"
 qtawesome = ">=1.3"
-triton-windows = "==3.6.0.post26"

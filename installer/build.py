@@ -1,6 +1,6 @@
 """Builds the clapsync Windows installer.
 
-Stages: build clapsync + framepipe wheels into installer/wheels/, fetch the
+Stages: build the clapsync wheel into installer/wheels/, fetch the
 pinned pixi.exe into installer/vendor/, relock installer/pixi.toml, then
 compile the Inno Setup script into outputs/ (compile stage added with the
 .iss file).
@@ -26,7 +26,6 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "installer"
 WHEELS = INSTALLER / "wheels"
 VENDOR = INSTALLER / "vendor"
-FRAMEPIPE = ROOT.parent / "framepipe"
 
 
 def run(cmd: list[str | Path]) -> None:
@@ -36,14 +35,11 @@ def run(cmd: list[str | Path]) -> None:
 
 
 def build_wheels() -> None:
-    """Builds clapsync and framepipe wheels into a clean wheels/ dir."""
+    """Builds the clapsync wheel into a clean wheels/ dir."""
     shutil.rmtree(WHEELS, ignore_errors=True)
     WHEELS.mkdir(parents=True)
-    for project in (ROOT, FRAMEPIPE):
-        if not project.exists():
-            sys.exit(f"missing checkout: {project}")
-        run([sys.executable, "-m", "pip", "wheel", "--no-deps",
-             "--wheel-dir", WHEELS, project])
+    run([sys.executable, "-m", "pip", "wheel", "--no-deps",
+         "--wheel-dir", WHEELS, ROOT])
 
 
 def fetch_pixi() -> None:
@@ -69,14 +65,13 @@ def relock() -> None:
     `pixi lock` is a no-op when the manifest text is unchanged, so it does
     not notice a rebuilt local wheel whose version changed (a bump would
     otherwise ship a lock pointing at the old wheel filename, breaking the
-    `--locked` install). `pixi update` on the local packages forces the lock
-    to point at the freshly built clapsync/framepipe wheels.
+    `--locked` install). `pixi update` on the local package forces the lock
+    to point at the freshly built clapsync wheel.
     """
     pixi = VENDOR / "pixi.exe"
     manifest = INSTALLER / "pixi.toml"
     run([pixi, "lock", "--manifest-path", manifest])
-    run([pixi, "update", "clapsync", "framepipe", "--manifest-path",
-         manifest])
+    run([pixi, "update", "clapsync", "--manifest-path", manifest])
 
 
 def app_version() -> str:

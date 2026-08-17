@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Literal
 
 import av
-from framepipe.metadata import extract_video_metadata
 
 from clapsync.app import mocap
 
@@ -81,8 +80,32 @@ def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
         return False, None, None
 
 
+def _video_meta(path: Path) -> tuple[float, int, int, float] | None:
+    """Return (duration, width, height, fps), or None when there is no video.
+
+    Duration comes from the video stream, falling back to the container when
+    the stream carries none; a few containers report neither, which yields 0.0.
+    """
+    try:
+        with av.open(str(path)) as container:
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            if stream.duration is not None:
+                duration = float(stream.duration * stream.time_base)
+            elif container.duration is not None:
+                duration = container.duration / av.time_base
+            else:
+                duration = 0.0
+            fps = float(stream.average_rate) if stream.average_rate else 0.0
+            return (duration, stream.codec_context.width,
+                    stream.codec_context.height, fps)
+    except av.FFmpegError:
+        return None
+
+
 def probe(path: Path) -> MediaInfo:
-    """Probe a media file via framepipe (video) and PyAV (audio) metadata.
+    """Probe a media file via PyAV stream metadata.
 
     A ``.c3d`` file is kind="mocap"; a file with a decodable video stream is
     kind="video"; otherwise it is treated as audio-only.
@@ -113,24 +136,18 @@ def probe(path: Path) -> MediaInfo:
 
     has_audio, sample_rate, audio_dur = _audio_meta(path)
 
-    # extract_video_metadata indexes streams.video[0] unguarded, so audio-only
-    # input raises bare IndexError. We catch it to detect "no video stream" and
-    # fall back to audio-only.
-    try:
-        vmeta = extract_video_metadata(str(path))
-    except (av.FFmpegError, ValueError, RuntimeError, IndexError):
-        vmeta = None
-
+    vmeta = _video_meta(path)
     if vmeta is not None:
+        duration, width, height, fps = vmeta
         return MediaInfo(
             path=path,
-            duration=vmeta.duration,
+            duration=duration,
             has_audio=has_audio,
             kind="video",
             sample_rate=sample_rate,
-            width=vmeta.width,
-            height=vmeta.height,
-            fps=vmeta.average_fps,
+            width=width,
+            height=height,
+            fps=fps,
         )
 
     if has_audio:

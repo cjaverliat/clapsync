@@ -6,8 +6,8 @@ decode stack after selection. Each can take several seconds, so the window looks
 hung. ``startup_progress`` puts up a busy dialog with a per-stage status line
 across such a stretch.
 
-Deliberately light — imports only PySide6 — so it can wrap the very torch/
-framepipe imports it reports on without pulling them in first.
+Deliberately light — imports only PySide6 — so it can wrap the very torch/av
+imports it reports on without pulling them in first.
 
 The dialog is indeterminate (range 0..0, marquee) and has no cancel button:
 these stages run synchronously on the main thread and can't be interrupted

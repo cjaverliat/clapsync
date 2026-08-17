@@ -190,7 +190,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Loading the decode stack (torch/torchaudio/framepipe) is a set of heavy
+    # Loading the decode stack (torch/torchaudio/av) is a set of heavy
     # imports kept out of module scope so earlier dialogs paint instantly. Run
     # the actual module execution off the main thread so the busy dialog keeps
     # animating; the module-scope re-import below is then a cached no-op. These
