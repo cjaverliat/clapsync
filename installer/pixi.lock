@@ -109,7 +109,7 @@ environments:
       - pypi: https://download-r2.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp313-cp313-win_amd64.whl
       - pypi: https://download-r2.pytorch.org/whl/cu130/torchaudio-2.11.0%2Bcu130-cp313-cp313-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl
-      - pypi: ./wheels\clapsync-0.6.0-py3-none-any.whl
+      - pypi: ./wheels\clapsync-0.7.0-py3-none-any.whl
 packages:
 - conda: https://conda.anaconda.org/conda-forge/win-64/aom-3.14.1-pl5321h06fc181_1.conda
   sha256: 3033fa8953f7f0c1bb5b89b5af77253badc14a89ba94d743dde3c9159e10fd5e
@@ -178,9 +178,9 @@ packages:
   purls: []
   size: 1537783
   timestamp: 1766416059188
-- pypi: ./wheels\clapsync-0.6.0-py3-none-any.whl
+- pypi: ./wheels\clapsync-0.7.0-py3-none-any.whl
   name: clapsync
-  version: 0.6.0
+  version: 0.7.0
   requires_dist:
   - numpy
   - torch>=2.11
