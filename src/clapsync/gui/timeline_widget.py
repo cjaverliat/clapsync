@@ -11,7 +11,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QInputDialog, QScrollBar, QWidget
 
-from clapsync.app.media import is_av
 from clapsync.gui.waveform_widget import downsample_peaks
 
 HEADER_H = 28
@@ -774,11 +773,9 @@ class SyncTrimTimelineWidget(TimelineWidget):
     def set_tracks(self, tracks: list[TrackState]) -> None:
         super().set_tracks(tracks)
         total = max((t.end_s for t in tracks), default=10.0)
-        # The default trim covers the audio/video overlap only; a c3d is placed
-        # by its clap link and may move, so it should not shrink the window.
-        av = [t for t in tracks if is_av(t.kind)] or tracks
-        shared_start = max((t.offset_s for t in av), default=0.0)
-        shared_end   = min((t.end_s   for t in av), default=total)
+        # The default trim covers the overlap of every track, c3d included.
+        shared_start = max((t.offset_s for t in tracks), default=0.0)
+        shared_end   = min((t.end_s   for t in tracks), default=total)
         if shared_start < shared_end:
             self._trim_start_s = shared_start
             self._trim_end_s   = shared_end
@@ -891,9 +888,8 @@ class SyncTrimTimelineWidget(TimelineWidget):
         x = float(event.position().x())
         y = float(event.position().y())
         for track in self._tracks:
-            # Locked (the reference) and fbx lanes are not directly editable —
-            # an fbx offset is slaved to its c3d, never set by hand.
-            if track.locked or track.kind == "fbx":
+            # The locked (reference) lane is not directly editable.
+            if track.locked:
                 continue
             rect = self._track_rect(track)
             if rect.contains(QPointF(x, y)):

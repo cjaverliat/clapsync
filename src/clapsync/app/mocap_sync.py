@@ -137,15 +137,12 @@ def bridge_mocap_offsets(
 ) -> tuple[list[float], list[float], list[str]]:
     """Compute shared-timeline offsets for the mocap tracks.
 
-    A c3d is placed by its own clapperboard motion against the sound anchor. An
-    fbx carries the same take but no clap to detect, so it inherits its c3d's
-    offset (single-c3d assumption); with no c3d present it is left at offset 0
-    with a warning.
+    A c3d is placed by its own clapperboard motion against the sound anchor.
 
     Args:
         av_media: The audio/video tracks (already synced).
         av_align: Their alignment (offsets/confidence on the shared timeline).
-        mocap_media: The c3d and fbx tracks to place.
+        mocap_media: The c3d tracks to place.
         mocap_indices: Global input indices of ``mocap_media`` (for messages
             and marker-choice lookup).
         marker_choices: Optional per-track (top, bottom) marker index groups;
@@ -162,11 +159,8 @@ def bridge_mocap_offsets(
     offsets: list[float] = [0.0] * total
     confidence: list[float] = [0.0] * total
     warnings: list[str] = []
-    c3d_local: int | None = None  # the c3d whose offset the fbx inherit
 
     for local, info in enumerate(mocap_media):
-        if info.kind == "fbx":
-            continue  # placed in the second pass, enslaved to the c3d
         name = info.path.name
         if status is not None:
             status(f"Aligning motion capture {local + 1}/{total}: {name}…")
@@ -184,21 +178,6 @@ def bridge_mocap_offsets(
         confidence[local] = 0.0 if warning else _SYNCED_CONFIDENCE
         if warning:
             warnings.append(warning)
-        if c3d_local is None:
-            c3d_local = local
-
-    for local, info in enumerate(mocap_media):
-        if info.kind != "fbx":
-            continue
-        name = info.path.name
-        if c3d_local is None:
-            warnings.append(
-                f"{name}: no c3d to inherit a clapperboard offset from — "
-                f"fbx left unsynced (offset 0)"
-            )
-            continue
-        offsets[local] = offsets[c3d_local]
-        confidence[local] = confidence[c3d_local]
 
     return offsets, confidence, warnings
 

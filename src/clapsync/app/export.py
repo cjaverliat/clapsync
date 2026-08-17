@@ -10,11 +10,10 @@ from pathlib import Path
 from typing import Callable, Literal
 
 import av
-import numpy as np
 import torch
 
 from clapsync.app.decode import load_audio
-from clapsync.app.mocap import MocapData, load_c3d, write_c3d
+from clapsync.app.mocap import load_c3d
 from clapsync.app.encode import (
     _audio_codec_for,
     _mux_audio_samples,
@@ -23,8 +22,7 @@ from clapsync.app.encode import (
     pick_video_codec,
     resolve_audio_output,
 )
-from clapsync.app import fbx
-from clapsync.app.media import MediaInfo, is_av, probe
+from clapsync.app.media import MediaInfo, probe
 from clapsync.app.sync import align_media
 from clapsync.core.offsets import Refine
 from clapsync.core.timerange import TimeRange, common_time_range, full_time_range
@@ -261,6 +259,13 @@ def _export_video_track(
             vstream.width = out_w
             vstream.height = out_h
             vstream.pix_fmt = "yuv420p"
+            # Encode on a fine (1/90000) time_base, not the default 1/fps. A
+            # VFR source (e.g. phone video) carries frame PTS that are close but
+            # distinct; rescaled to a 1/fps grid two neighbours round to the
+            # same tick, and the muxer rejects the duplicate DTS ("non
+            # monotonically increasing dts"). 1/90000 keeps them distinct and
+            # lets the preserved sub-frame trim offset actually survive encode.
+            vstream.codec_context.time_base = Fraction(1, 90000)
             vstream.options = _quality_options(codec, settings.crf)
 
             astream = None
@@ -325,63 +330,27 @@ def _build_audio_samples(
     return out, rate
 
 
-def _export_mocap_track(
+def _export_mocap_trim_txt(
     info: MediaInfo, offset: float, trim: TimeRange, out_path: Path
 ) -> None:
-    """Trim + pad a c3d track to the shared trim range and write it.
+    """Write the c3d's trim as start/end frame numbers, in the c3d's timeline.
 
-    Frames inside the source window are kept; regions outside coverage are
-    padded with invalid frames (residual −1), mirroring the audio silence-pad.
-    Analog data rides along with its point frame, so it stays aligned. The
-    output frame numbering restarts at 1.
+    Rather than exporting a trimmed .c3d, record where the shared trim falls in
+    the source c3d: the frames are ``round((trim - offset) * point_rate)`` mapped
+    into the c3d's own numbering (offset by its ``first_frame``). The numbers are
+    deliberately *not* clamped to the frames the c3d covers — a trim reaching
+    outside the capture reports a frame before ``first_frame`` (possibly
+    negative) or past the last one, so the padding is visible instead of being
+    silently collapsed onto the capture's own bounds.
     """
     data = load_c3d(info.path)
     rate = data.point_rate
-    local_start, local_end, pad_start, pad_end = clip_window(
-        offset, info.duration, trim,
+    start_frame = data.first_frame + round((trim.start - offset) * rate)
+    end_frame = data.first_frame + round((trim.end - offset) * rate)
+    out_path.write_text(
+        f"start_frame: {start_frame}\nend_frame: {end_frame}\n",
+        encoding="utf-8",
     )
-    f0 = max(0, round(local_start * rate))
-    f1 = min(data.n_frames, round(local_end * rate))
-    total = round(trim.duration * rate)
-    pad_front = round(pad_start * rate)
-
-    n_markers = data.n_markers
-    points = np.zeros((total, n_markers, 3), dtype=np.float32)
-    valid = np.zeros((total, n_markers), dtype=bool)  # pad frames invalid
-    analog = np.zeros((total, *data.analog.shape[1:]), dtype=np.float32)
-
-    core = max(0, f1 - f0)
-    end = min(total, pad_front + core)
-    keep = end - pad_front
-    if keep > 0:
-        points[pad_front:end] = data.points[f0 : f0 + keep]
-        valid[pad_front:end] = data.valid[f0 : f0 + keep]
-        analog[pad_front:end] = data.analog[f0 : f0 + keep]
-
-    trimmed = MocapData(
-        point_rate=rate,
-        first_frame=1,
-        labels=data.labels,
-        points=points,
-        valid=valid,
-        analog=analog,
-        analog_rate=data.analog_rate,
-        source_path=info.path,
-    )
-    write_c3d(out_path, trimmed)
-
-
-def _export_fbx_track(
-    info: MediaInfo, offset: float, trim: TimeRange, out_path: Path
-) -> None:
-    """Trim + freeze-pad an fbx track to the shared trim range and write it.
-
-    The fbx rides the same window math as every other track; ``fbx.trim_fbx``
-    turns the seconds window into the frame-aligned, pad-held animation (see
-    ``_export_mocap_track`` for the parallel c3d path).
-    """
-    window = clip_window(offset, info.duration, trim)
-    fbx.trim_fbx(info.path, out_path, window, info.fps)
 
 
 def export_media(
@@ -415,11 +384,8 @@ def export_media(
             break
         try:
             if info.kind == "mocap":
-                out_path = settings.output_dir / f"{info.path.stem}_synced.c3d"
-                _export_mocap_track(info, offset, trim, out_path)
-            elif info.kind == "fbx":
-                out_path = settings.output_dir / f"{info.path.stem}_synced.fbx"
-                _export_fbx_track(info, offset, trim, out_path)
+                out_path = settings.output_dir / f"{info.path.stem}_trim.txt"
+                _export_mocap_trim_txt(info, offset, trim, out_path)
             elif info.kind == "video":
                 out_path = settings.output_dir / f"{info.path.stem}_synced.mp4"
                 _export_video_track(
@@ -530,16 +496,11 @@ def sync_and_trim(
         logger.warning("sync: %s", warning)
     offsets = alignment.offsets
 
-    # The trim range is taken over audio/video only — a c3d's offset is set by
-    # its clap link and can move, so it should not constrain the default window.
-    # Export still applies the chosen trim to every track (c3d included).
-    av = [(m.duration, o) for m, o in zip(media, offsets) if is_av(m.kind)]
-    durations, av_offsets = (
-        ([d for d, _ in av], [o for _, o in av]) if av
-        else ([m.duration for m in media], offsets)
-    )
+    # The trim range spans every track, c3d included: a c3d's offset comes from
+    # its clap link, but the frames it actually covers still bound the window.
+    durations = [m.duration for m in media]
     rng = (common_time_range if trim == "common" else full_time_range)(
-        durations, av_offsets,
+        durations, offsets,
     )
     settings = ExportSettings(trim=rng, output_dir=output_dir)
 

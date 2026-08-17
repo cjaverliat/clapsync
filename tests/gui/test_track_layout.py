@@ -28,11 +28,11 @@ def qapp():
 
 
 def _tracks_in_display_order() -> list[TrackState]:
-    # Global indices: 0=video 1=c3d 2=fbx 3=audio. Display order groups A/V
-    # (0, 3) first, then the c3d (1) with its fbx (2) beneath it. offset_s is
-    # set to the global index so a permuted get_offsets would be detectable.
-    kinds = {0: "video", 1: "mocap", 2: "fbx", 3: "audio"}
-    order = [0, 3, 1, 2]
+    # Global indices: 0=video 1=c3d 2=audio. Display order puts A/V (0, 2)
+    # first, then the c3d (1). offset_s is set to the global index so a permuted
+    # get_offsets would be detectable.
+    kinds = {0: "video", 1: "mocap", 2: "audio"}
+    order = [0, 2, 1]
     return [
         TrackState(index=i, label=str(i), offset_s=float(i),
                    duration_s=1.0, kind=kinds[i])
@@ -44,7 +44,7 @@ def test_lane_row_follows_display_order(qapp):
     timeline = SyncTrimTimelineWidget()
     timeline.set_tracks(_tracks_in_display_order())
 
-    assert timeline._row_by_index == {0: 0, 3: 1, 1: 2, 2: 3}
+    assert timeline._row_by_index == {0: 0, 2: 1, 1: 2}
     for row, track in enumerate(timeline._tracks):
         rect = timeline._track_rect(track)
         expected_y = HEADER_H + TRACK_PAD + row * (TRACK_H + TRACK_PAD)
@@ -55,5 +55,5 @@ def test_get_offsets_stays_keyed_by_track_index(qapp):
     timeline = SyncTrimTimelineWidget()
     timeline.set_tracks(_tracks_in_display_order())
 
-    # Global (index) order, not the [0, 3, 1, 2] display order.
-    assert timeline.get_offsets() == [0.0, 1.0, 2.0, 3.0]
+    # Global (index) order, not the [0, 2, 1] display order.
+    assert timeline.get_offsets() == [0.0, 1.0, 2.0]

@@ -92,7 +92,7 @@ class TrackHeaderPanel(QWidget):
             # Kind icon.
             cy = rect.center().y()
             kind_name = (
-                "mocap" if track.kind in ("mocap", "fbx")
+                "mocap" if track.kind == "mocap"
                 else "audio" if track.kind == "audio"
                 else "video"
             )

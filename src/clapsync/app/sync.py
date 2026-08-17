@@ -215,9 +215,8 @@ def compute_sync_offsets(
     Args:
         paths: Input media file paths.
         media: Optional pre-probed MediaInfo, one per path in order. When given,
-            the probe phase is skipped — the GUI probes on the main thread (fbx
-            probing runs bpy, which is main-thread-only) and reuses the result
-            here so the worker thread never re-probes.
+            the probe phase is skipped — the GUI probes once and reuses the
+            result here so the worker thread never re-probes.
         reference_index: Track whose timeline is the origin (must be A/V; a
             mocap reference falls back to the first A/V track).
         refine: Peak refinement.

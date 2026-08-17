@@ -34,7 +34,6 @@ framepipe = "*"
 torch = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
 torchaudio = { version = ">=2.11.0,<2.12.0", index = "https://download.pytorch.org/whl/cu130" }
 av = ">=18"
-bpy = ">=5.2,<5.3"
 c3d = ">=0.5"
 PySide6 = ">=6.8.0,<6.9"
 qtawesome = ">=1.3"

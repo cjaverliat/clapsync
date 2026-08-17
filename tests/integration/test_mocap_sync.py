@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from clapsync.app.export import ExportSettings, export_media
-from clapsync.app.media import MediaInfo, probe
+from clapsync.app.media import probe
 from clapsync.app.mocap import load_c3d
 from clapsync.app.sync import align_media
 from clapsync.core.timerange import full_time_range
@@ -87,12 +87,29 @@ def test_c3d_syncs_to_audio_clap_and_exports(tmp_path: Path):
     results = export_media(media, alignment.offsets, settings)
 
     assert all(r.ok for r in results), [r.error for r in results]
-    exported = out_dir / "clap_synced.c3d"
+    # The c3d exports a trim-frames txt (start/end frame in the c3d timeline),
+    # not a trimmed .c3d.
+    exported = out_dir / "clap_trim.txt"
     assert exported.exists()
 
-    data = load_c3d(exported)
-    assert data.n_frames == round(trim.duration * POINT_RATE)
-    assert data.labels[:2] == ["clapperboard_top", "clapperboard_down"]
+    lines = dict(
+        line.split(": ", 1)
+        for line in exported.read_text().strip().splitlines()
+    )
+    source = load_c3d(c3d_path)
+    start_frame = int(lines["start_frame"])
+    end_frame = int(lines["end_frame"])
+    # The trim window starts ~0.6 s before the c3d does, so start_frame reports a
+    # frame *before* the source's first one — the head padding stays visible
+    # rather than being clamped onto first_frame.
+    offset = alignment.offsets[1]
+    assert start_frame == source.first_frame + round(
+        (trim.start - offset) * POINT_RATE
+    )
+    assert start_frame < source.first_frame
+    assert end_frame == source.first_frame + round(
+        (trim.end - offset) * POINT_RATE
+    )
 
 
 @pytest.mark.slow
@@ -111,45 +128,6 @@ def test_reference_never_c3d(tmp_path: Path):
     assert not any("reference" in w for w in alignment.warnings)
     assert abs(alignment.offsets[0] - (AUDIO_CLAP_S - MOTION_CLAP_S)) < 0.05
 
-
-def _fbx_info(path: Path, duration: float = 2.0) -> MediaInfo:
-    """A stand-in fbx MediaInfo — align_media never loads the fbx itself, so the
-    path need not exist and no bpy import is triggered."""
-    return MediaInfo(
-        path=path, duration=duration, has_audio=False, kind="fbx", fps=120.0,
-    )
-
-
-@pytest.mark.slow
-def test_fbx_inherits_c3d_offset_and_is_excluded_from_av_sync(tmp_path: Path):
-    wav = tmp_path / "cam.wav"
-    c3d_path = tmp_path / "clap.c3d"
-    _write_clap_wav(wav)
-    _write_clap_c3d(c3d_path)
-
-    media = [probe(wav), probe(c3d_path), _fbx_info(tmp_path / "anim.fbx")]
-    alignment = align_media(media, reference_index=0, target_rate=16000)
-
-    # The A/V track is the reference; the fbx is never MFCC-aligned against it.
-    assert math.isinf(alignment.confidence[0])
-    c3d_offset = alignment.offsets[1]
-    assert abs(c3d_offset - (AUDIO_CLAP_S - MOTION_CLAP_S)) < 0.05
-    # The fbx rides its c3d: same offset, same (finite) confidence.
-    assert alignment.offsets[2] == c3d_offset
-    assert alignment.confidence[2] == alignment.confidence[1]
-
-
-@pytest.mark.slow
-def test_fbx_without_c3d_is_left_unsynced(tmp_path: Path):
-    wav = tmp_path / "cam.wav"
-    _write_clap_wav(wav)
-
-    media = [probe(wav), _fbx_info(tmp_path / "anim.fbx")]
-    alignment = align_media(media, reference_index=0, target_rate=16000)
-
-    assert alignment.offsets[1] == 0.0
-    assert alignment.confidence[1] == 0.0
-    assert any("no c3d to inherit" in w for w in alignment.warnings)
 
 
 @pytest.mark.slow

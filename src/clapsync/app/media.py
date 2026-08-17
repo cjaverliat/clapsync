@@ -8,7 +8,6 @@ from typing import Literal
 import av
 from framepipe.metadata import extract_video_metadata
 
-from clapsync.app import fbx
 from clapsync.app import mocap
 
 
@@ -19,7 +18,7 @@ class MediaInfo:
     path: Path
     duration: float
     has_audio: bool
-    kind: Literal["audio", "video", "mocap", "fbx"]
+    kind: Literal["audio", "video", "mocap"]
     sample_rate: int | None = None
     width: int | None = None
     height: int | None = None
@@ -31,9 +30,9 @@ def track_family(kind: str) -> Literal["av", "mocap"]:
     """Group a track kind into a family.
 
     "av" (audio, video) tracks drive audio sync — they are reference-eligible,
-    MFCC-aligned, and define the trim window. "mocap" (c3d, fbx) tracks carry no
+    MFCC-aligned, and define the trim window. "mocap" (c3d) tracks carry no
     audio and cannot self-sync; they are placed by the clapperboard link (the
-    c3d against the A/V clap, and each fbx enslaved to its c3d).
+    c3d against the A/V clap).
     """
     return "av" if kind in ("audio", "video") else "mocap"
 
@@ -44,13 +43,11 @@ def is_av(kind: str) -> bool:
 
 
 def family_display_order(kinds: list[str]) -> list[int]:
-    """Row order for track lanes: A/V first, then the mocap family.
+    """Row order for track lanes: A/V first, then the mocap (c3d) tracks.
 
-    Within the mocap family each fbx is grouped directly under its c3d (a
-    single-c3d take, so every fbx sits under the first c3d; fbx with no c3d
-    trail the group). This is display order only — the returned values are the
-    original track indices, each appearing exactly once, so every data lookup
-    still keys by the track's own index.
+    This is display order only — the returned values are the original track
+    indices, each appearing exactly once, so every data lookup still keys by the
+    track's own index.
 
     Args:
         kinds: Track kinds in input order.
@@ -59,16 +56,7 @@ def family_display_order(kinds: list[str]) -> list[int]:
         Track indices permuted into display order.
     """
     av = [i for i, kind in enumerate(kinds) if is_av(kind)]
-    c3ds = [i for i, kind in enumerate(kinds) if kind == "mocap"]
-    fbxs = [i for i, kind in enumerate(kinds) if kind == "fbx"]
-
-    mocap: list[int] = []
-    for c3d in c3ds:
-        mocap.append(c3d)
-        if c3d == c3ds[0]:  # fbx ride the first (assumed only) c3d
-            mocap.extend(fbxs)
-    if not c3ds:
-        mocap.extend(fbxs)
+    mocap = [i for i, kind in enumerate(kinds) if kind == "mocap"]
     return av + mocap
 
 
@@ -96,9 +84,8 @@ def _audio_meta(path: Path) -> tuple[bool, int | None, float | None]:
 def probe(path: Path) -> MediaInfo:
     """Probe a media file via framepipe (video) and PyAV (audio) metadata.
 
-    A ``.c3d`` file is kind="mocap"; a ``.fbx`` file is kind="fbx" (probed via
-    bpy); a file with a decodable video stream is kind="video"; otherwise it is
-    treated as audio-only.
+    A ``.c3d`` file is kind="mocap"; a file with a decodable video stream is
+    kind="video"; otherwise it is treated as audio-only.
 
     Args:
         path: Source media path.
@@ -122,16 +109,6 @@ def probe(path: Path) -> MediaInfo:
             has_audio=False,
             kind="mocap",
             point_rate=point_rate,
-        )
-
-    if path.suffix.lower() == ".fbx":
-        fps, n_frames = fbx.probe_fbx(path)
-        return MediaInfo(
-            path=path,
-            duration=n_frames / fps if fps else 0.0,
-            has_audio=False,
-            kind="fbx",
-            fps=fps,
         )
 
     has_audio, sample_rate, audio_dur = _audio_meta(path)
