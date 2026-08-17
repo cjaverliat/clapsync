@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import logging
 import math
-import time
 from pathlib import Path
 
 import numpy as np
-import torch
 
-from PySide6.QtCore import Qt, QThread, QTimer, Slot
+from PySide6.QtCore import Qt, QThread, Slot
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -38,16 +36,38 @@ from clapsync.core.clap import (
     detect_clap_motions,
 )
 from clapsync.gui import icons
-from clapsync.gui.audio_engine import AudioEngine
 from clapsync.gui.c3d_preview import C3DMarkerPreviewWidget
 from clapsync.gui.export_dialog import ExportDialog, fmt_time
-from clapsync.gui.playback_clock import slew_clock
-from clapsync.gui.video_player import VideoPlayerWidget, VideoGroupWorker
+from clapsync.gui.progress import run_blocking_with_progress
+from clapsync.gui.qt_preview import QtPreviewController
 from clapsync.gui.timeline_widget import SyncTrimTimelineWidget, TrackState
 from clapsync.gui.track_panel import TrackHeaderPanel
 from clapsync.gui.workers import ExportWorker
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_lane_waveforms(
+    infos: list[MediaInfo],
+) -> dict[int, np.ndarray]:
+    """Decode a 16 kHz lane waveform for every audio-bearing track.
+
+    Standalone audio files and video tracks with an audio stream alike get a
+    waveform for their timeline lane. Pure decode (no Qt), so it can run off the
+    GUI thread behind a busy dialog.
+    """
+    waves: dict[int, np.ndarray] = {}
+    for i, info in enumerate(infos):
+        if not info.has_audio:
+            continue
+        try:
+            wave, _rate = load_audio(info.path, target_rate=16000)
+            waves[i] = wave.reshape(-1).cpu().numpy()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to load waveform for %s: %s", info.path.name, exc
+            )
+    return waves
 
 
 class _MosaicContainer(QWidget):
@@ -90,19 +110,13 @@ class SyncEditorWindow(QMainWindow):
         self._output_dir: Path = output_dir or Path.home()
         self._export_thread: QThread | None = None
 
-        self._group_worker: VideoGroupWorker | None = None
-        self._group_thread: QThread | None = None
+        # Qt-native preview transport: one QMediaPlayer per audible track, a
+        # master (the reference) that free-runs and is audible, the rest slaved
+        # to its position. Built after probing, before the mosaic cells (they
+        # embed each video track's QVideoWidget).
+        self._preview: QtPreviewController | None = None
         self._is_playing: bool = False
-        self._seek_gen: int = 0
-        self._video_eof_pending: bool = False
         self._muted: list[bool] = []
-        # Smooth-render clock: track the audio played-clock on a steady GUI
-        # timer so the playhead and c3d preview glide (like the video, which
-        # tracks the same master in its decode thread) instead of stepping on
-        # the coarse, jittery audio-tick cadence. None means "re-lock on the
-        # next tick" (set on play/seek); slew_clock then keeps it smooth.
-        self._render_clock: float | None = None
-        self._render_last_perf: float = 0.0
 
         for path in video_paths:
             logger.debug("probe: %s", path.name)
@@ -132,12 +146,18 @@ class SyncEditorWindow(QMainWindow):
         self._muted: list[bool] = [False] * len(self._video_infos)
         self._has_mocap = any(i.kind == "mocap" for i in self._video_infos)
 
+        self._preview = QtPreviewController(
+            self._video_infos, self._offsets, self._reference_index(),
+            self._use_proxies, muted=self._muted, parent=self,
+        )
+        self._preview.position_changed.connect(self._on_position_changed)
+        self._preview.eof.connect(self._on_eof)
+
         self._build_ui()
         self._init_clap_links()
         self._wire_signals()
         self._init_timeline()
-        self._init_audio()
-        self._load_all_videos()
+        self._preview.seek(self._trim_start)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -151,10 +171,10 @@ class SyncEditorWindow(QMainWindow):
         # visual sources (video, motion capture) tile the mosaic.
         _MIN_CELL_W = 200
         # Only visual sources tile the mosaic: video and c3d (marker preview).
-        # Audio has its waveform lane; an fbx is a timeline lane only (no cell).
+        # Audio has its waveform lane, no cell.
         n = sum(
             1 for info in self._video_infos
-            if info.kind not in ("audio", "fbx")
+            if info.kind != "audio"
         )
         available_w = self.width() - 16
         if n > 0 and available_w // n >= _MIN_CELL_W:
@@ -181,27 +201,21 @@ class SyncEditorWindow(QMainWindow):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(4)
 
-        self._players: list[VideoPlayerWidget] = []
-        self._video_slots: list[int] = []
         self._mocap_previews: dict[int, C3DMarkerPreviewWidget] = {}
+
         # Audio waveforms render inside their timeline lanes, not as widgets.
-        self._track_waves: dict[int, np.ndarray] = {}
+        # Decode every audio-bearing track's lane waveform up front, off the GUI
+        # thread behind a busy dialog, so the mosaic build below (which touches
+        # Qt widgets and must stay on the GUI thread) doesn't freeze the window
+        # while it loads.
+        self._track_waves = run_blocking_with_progress(
+            lambda: _decode_lane_waveforms(self._video_infos),
+            "Loading waveforms…",
+        )
 
         slot = 0  # grid position among visual (non-audio) tracks
         for i, info in enumerate(self._video_infos):
-            # Load a waveform for any track carrying audio — standalone audio
-            # files and video tracks with an audio stream alike — so it renders
-            # in the timeline lane.
-            if info.has_audio:
-                try:
-                    wave, _rate = load_audio(info.path, target_rate=16000)
-                    self._track_waves[i] = wave.reshape(-1).cpu().numpy()
-                except Exception as exc:
-                    logger.warning(
-                        "failed to load waveform for %s: %s", info.path.name, exc
-                    )
-
-            if info.kind in ("audio", "fbx"):
+            if info.kind == "audio":
                 continue
 
             cell = QWidget()
@@ -215,12 +229,10 @@ class SyncEditorWindow(QMainWindow):
             cell_layout.addWidget(name_lbl)
 
             if info.kind == "video":
-                player = VideoPlayerWidget()
+                player = self._preview.video_widget(i)
                 player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
                 player.setMinimumSize(160, 90)
                 cell_layout.addWidget(player, stretch=1)
-                self._players.append(player)
-                self._video_slots.append(i)
             else:  # mocap
                 preview = self._build_mocap_preview(i, info)
                 cell_layout.addWidget(preview, stretch=1)
@@ -367,58 +379,9 @@ class SyncEditorWindow(QMainWindow):
         self._timeline.vscroll_changed.connect(self._track_panel.set_scroll_y)
         self._track_panel.mute_changed.connect(self._on_mute)
         self._export_btn.clicked.connect(self._on_export)
-        # Note: position tracking is done directly in _on_frames_ready, not via
-        # individual player signals, to avoid double-updates.
-
-        # Debounce for the loading overlay: only show after 150 ms so that fast
-        # seeks (typically <100 ms) don't cause a visible blink.
-        self._loading_debounce = QTimer(self)
-        self._loading_debounce.setSingleShot(True)
-        self._loading_debounce.setInterval(150)
-        self._loading_debounce.timeout.connect(
-            lambda: (
-                self._loading_overlay.setVisible(True),
-                self._loading_overlay.raise_(),
-            )
-        )
-
-        # 60 Hz smooth-render timer for the playhead + c3d preview (see
-        # _on_render_tick). Runs only while playing with audio as the clock.
-        self._render_timer = QTimer(self)
-        self._render_timer.setInterval(16)
-        self._render_timer.timeout.connect(self._on_render_tick)
-
-    def _render_pos(self) -> float:
-        """Tracked audio played-position: smooth between coarse clock ticks.
-
-        Feeds the GUI perf-counter forward and slews toward the audio
-        played-clock (see playback_clock.slew_clock), so the playhead and c3d
-        glide yet stay locked to the sound without the periodic jump a hard
-        re-anchor caused. A large jump (a seek) snaps in one step; on a re-lock
-        the first tick adopts the clock's current value.
-        """
-        now = time.perf_counter()
-        target = self._audio.clock_s
-        if self._render_clock is None:
-            self._render_clock, self._render_last_perf = target, now
-            return target
-        dt = now - self._render_last_perf
-        self._render_last_perf = now
-        self._render_clock = slew_clock(self._render_clock, target, dt)
-        return self._render_clock
-
-    def _start_render(self) -> None:
-        """Begin smooth visual updates from the audio clock (audio playback only)."""
-        if self._audio.enabled:
-            self._render_clock = None  # re-lock to wherever the audio clock is now
-            self._render_timer.start()
-
-    def _stop_render(self) -> None:
-        self._render_timer.stop()
-
-    def _on_render_tick(self) -> None:
-        if self._is_playing:
-            self._on_position_changed(self._render_pos())
+        # The playhead and c3d preview are driven by the preview controller's
+        # position_changed signal (emitted on its render tick while playing and
+        # on every seek), so no separate render timer lives here.
 
     def _reference_index(self) -> int:
         """The sync-reference track: the first audio-bearing track, never a c3d.
@@ -436,8 +399,8 @@ class SyncEditorWindow(QMainWindow):
 
     def _init_timeline(self) -> None:
         reference = self._reference_index()
-        # Lanes are grouped by family (A/V first, each fbx under its c3d); the
-        # TrackState keeps its global index, so data lookups are unaffected.
+        # Lanes are grouped by family (A/V first, then c3d); the TrackState
+        # keeps its global index, so data lookups are unaffected.
         order = family_display_order([info.kind for info in self._video_infos])
         tracks = [
             TrackState(
@@ -458,74 +421,6 @@ class SyncEditorWindow(QMainWindow):
         self._rebuild_clap_markers()
         self._trim_start, self._trim_end = self._timeline.get_trim()
 
-    def _init_audio(self) -> None:
-        self._audio = AudioEngine(self)
-        waveforms = []
-        for info in self._video_infos:
-            if not is_av(info.kind):
-                waveforms.append(torch.zeros(1, 1))  # motion capture is silent
-                continue
-            try:
-                w, _rate = load_audio(info.path, target_rate=48000)
-            except Exception as exc:
-                logger.warning(
-                    "failed to load audio track for %s: %s", info.path.name, exc
-                )
-                w = torch.zeros(1, 1)
-            waveforms.append(w)
-        self._audio.set_tracks(waveforms, self._offsets)
-        self._audio.set_muted(self._muted)
-        self._audio.position_changed.connect(self._on_audio_tick)
-
-    def _load_all_videos(self) -> None:
-        paths = [self._video_infos[i].path for i in self._video_slots]
-        video_offsets = [self._offsets[i] for i in self._video_slots]
-
-        self._stop_group_worker()
-
-        if not paths:
-            # No video tracks: playback is driven entirely by the audio engine.
-            self._sync_seek_all(self._trim_start)
-            return
-
-        worker = VideoGroupWorker(use_proxies=self._use_proxies, audio=self._audio)
-        thread = QThread(self)
-        worker.moveToThread(thread)
-
-        worker.frames_ready.connect(
-            self._on_frames_ready, Qt.ConnectionType.QueuedConnection
-        )
-        worker.loading_changed.connect(
-            self._on_loading_changed, Qt.ConnectionType.QueuedConnection
-        )
-        worker.eof_reached.connect(
-            self._on_eof, Qt.ConnectionType.QueuedConnection
-        )
-        thread.started.connect(worker.run)
-
-        self._group_worker = worker
-        self._group_thread = thread
-        thread.start()
-
-        logger.info(
-            "_load_all_videos: opening %d video(s) via VideoGroupWorker", len(paths)
-        )
-        worker.cmd("open", paths, video_offsets)
-        # Slave video decode to the audio played-clock so the picture and the
-        # sound stay locked; without audio, video keeps its own wall clock.
-        if self._audio.enabled:
-            worker.cmd("audio_master", True)
-        self._sync_seek_all(self._trim_start)
-
-    def _stop_group_worker(self) -> None:
-        if self._group_worker is not None:
-            self._group_worker.cmd("stop")
-        if self._group_thread is not None:
-            self._group_thread.quit()
-            self._group_thread.wait(2000)
-        self._group_worker = None
-        self._group_thread = None
-
     def _update_time_label(self, current: float) -> None:
         self._time_label.setText(
             f"{fmt_time(current)} / {fmt_time(self._trim_end)}"
@@ -533,53 +428,11 @@ class SyncEditorWindow(QMainWindow):
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
-    @Slot(object, float, int)
-    def _on_frames_ready(
-        self,
-        frames: list[np.ndarray | None],
-        global_ts: float,
-        seek_gen: int,
-    ) -> None:
-        self._video_eof_pending = False
-        for player, frame in zip(self._players, frames):
-            player.display_frame(frame)
-        # Reject frames that were emitted before the most recent seek was
-        # processed by the worker — their timestamps pre-date the new position.
-        if global_ts >= 0.0 and seek_gen >= self._seek_gen:
-            # While playing with audio, the audio played-clock owns the playhead
-            # and the c3d preview (see _on_audio_tick) — the video merely follows
-            # it, so its timestamp must not drive the playhead too, or the two
-            # clocks would fight. Video drives only when there is no audio, or
-            # when paused (a seek needs the frame's own time reflected).
-            if not (self._audio.enabled and self._is_playing):
-                self._on_position_changed(global_ts)
-
-    @Slot(bool)
-    def _on_loading_changed(self, loading: bool) -> None:
-        if loading:
-            # Show overlay only if loading takes longer than the debounce interval.
-            self._loading_debounce.start()
-        else:
-            self._loading_debounce.stop()
-            self._loading_overlay.setVisible(False)
-            # If the user paused while the worker was blocked in a seek/load, the
-            # "pause" command may have been processed before the load started and a
-            # stale "play" could still be in flight. Re-assert the paused state.
-            if not self._is_playing and self._group_worker is not None:
-                self._group_worker.cmd("pause")
-
     def _restart_from_trim_start(self) -> None:
         """Loop: seek every track back to the trim start and resume."""
-        self._video_eof_pending = False
-        self._sync_seek_all(self._trim_start)
         self._global_pos = self._trim_start
-        # Start audio first so its clock (clock_s) is live before the video
-        # worker reads it to place its first decoded frame.
-        if self._audio.enabled:
-            self._audio.play()
-        if self._group_worker is not None:
-            self._group_worker.cmd("play")
-        self._start_render()
+        self._preview.seek(self._trim_start)
+        self._preview.play()
 
     def _show_play(self) -> None:
         self._play_btn.setIcon(icons.icon("play"))
@@ -590,29 +443,15 @@ class SyncEditorWindow(QMainWindow):
         self._play_btn.setText("  Pause")
 
     def _stop_playback(self) -> None:
-        """Stop: pause the worker (a no-op at EOF) and reset the play button."""
+        """Stop: pause the transport and reset the play button."""
         self._is_playing = False
-        self._video_eof_pending = False
-        self._stop_render()
-        if self._group_worker is not None:
-            self._group_worker.cmd("pause")
-        self._audio.pause()
+        self._preview.pause()
         self._show_play()
 
     @Slot()
     def _on_eof(self) -> None:
         if self._is_playing and self._loop_checkbox.isChecked():
             self._restart_from_trim_start()
-            return
-        if (
-            self._is_playing
-            and self._global_pos < self._trim_end - 0.05
-            and self._audio.enabled
-        ):
-            # Video ran out of frames before the trim end, but the audio mix
-            # still has content — let it carry playback to trim_end instead
-            # of stopping early.
-            self._video_eof_pending = True
             return
         self._stop_playback()
         logger.debug("SyncEditorWindow: EOF — playback stopped")
@@ -621,33 +460,15 @@ class SyncEditorWindow(QMainWindow):
     def _on_play_pause(self) -> None:
         if self._is_playing:
             self._is_playing = False
-            self._video_eof_pending = False
-            self._stop_render()
-            if self._group_worker is not None:
-                self._group_worker.cmd("pause")
-            self._audio.pause()
-            self._sync_seek_all(self._global_pos)
+            self._preview.pause()
             self._show_play()
         else:
             if self._global_pos >= self._trim_end - 0.05 or self._global_pos < self._trim_start:
-                self._sync_seek_all(self._trim_start)
+                self._preview.seek(self._trim_start)
                 self._global_pos = self._trim_start
             self._is_playing = True
-            # Audio first so clock_s is live before the worker chases it.
-            if self._audio.enabled:
-                self._audio.play()
-            if self._group_worker is not None:
-                self._group_worker.cmd("play")
-            self._start_render()
+            self._preview.play()
             self._show_pause()
-
-    def _sync_seek_all(self, global_s: float) -> None:
-        self._seek_gen += 1
-        self._audio.seek(global_s)
-        if self._group_worker is None:
-            return
-        logger.debug("SyncEditorWindow: seek_all  global_ts=%.4fs", global_s)
-        self._group_worker.cmd("seek", global_s, self._seek_gen)
 
     def _frame_step(self) -> float:
         """Seconds per frame at the finest rate present (video fps / c3d rate)."""
@@ -664,12 +485,11 @@ class SyncEditorWindow(QMainWindow):
     @Slot(float)
     def _on_playhead_seek(self, global_s: float) -> None:
         global_s = max(self._trim_start, min(self._trim_end, global_s))
-        was_playing = self._is_playing
         self._global_pos = global_s
-        self._render_clock = None  # re-lock the smooth-render clock after the jump
-        self._sync_seek_all(global_s)
-        if was_playing and self._group_worker is not None:
-            self._group_worker.cmd("play")
+        # seek() repositions every player (and keeps them playing if they were);
+        # it also emits position_changed, but update the UI here too so a paused
+        # scrub reflects immediately without waiting on the player's async pos.
+        self._preview.seek(global_s)
         self._timeline.set_playhead(global_s)
         self._update_time_label(global_s)
         self._update_mocap_previews(global_s)
@@ -680,41 +500,16 @@ class SyncEditorWindow(QMainWindow):
             rate = self._video_infos[idx].point_rate or 0.0
             preview.set_frame(round((global_s - self._offsets[idx]) * rate))
 
-    def _sync_fbx_to_c3d(self, offsets: list[float]) -> list[float]:
-        """Slave every fbx offset to its c3d (single-c3d assumption).
-
-        An fbx shares the take with the c3d and is not independently placeable,
-        so it always sits at the c3d's offset. Mutates and returns ``offsets``;
-        a no-op when there is no c3d.
-        """
-        c3d = next(
-            (i for i, inf in enumerate(self._video_infos)
-             if inf.kind == "mocap"),
-            None,
-        )
-        if c3d is None:
-            return offsets
-        for i, info in enumerate(self._video_infos):
-            if info.kind == "fbx":
-                offsets[i] = offsets[c3d]
-        return offsets
-
     @Slot(list)
     def _on_offsets_changed(self, offsets: list[float]) -> None:
-        offsets = self._sync_fbx_to_c3d(offsets)
         self._offsets = offsets
-        # The fbx correction above may differ from what the timeline emitted, so
-        # push it back to keep the fbx lanes riding their c3d.
         self._timeline.set_offsets(offsets)
-        self._audio.set_offsets(offsets)
-        if self._group_worker is not None:
-            video_offsets = [offsets[i] for i in self._video_slots]
-            self._group_worker.cmd("update_offsets", video_offsets)
+        self._preview.set_offsets(offsets)
         # Trim bounds may have been adjusted by _clamp_trim_to_tracks in the timeline.
         self._trim_start, self._trim_end = self._timeline.get_trim()
         clamped = max(self._trim_start, min(self._trim_end, self._global_pos))
         self._global_pos = clamped
-        self._sync_seek_all(clamped)
+        self._preview.seek(clamped)
         self._timeline.set_playhead(clamped)
         self._update_time_label(clamped)
 
@@ -774,21 +569,19 @@ class SyncEditorWindow(QMainWindow):
 
     def _apply_clap_link(self) -> None:
         """Push updated c3d offsets to the timeline, trim, previews, markers."""
-        self._offsets = self._sync_fbx_to_c3d(self._offsets)
         self._timeline.set_offsets(self._offsets)
         self._refit_trim()
         self._on_offsets_changed(self._offsets)
         self._rebuild_clap_markers()
 
     def _refit_trim(self) -> None:
-        """Reset the trim to the audio/video overlap after offsets change."""
-        av = [(info.duration, self._offsets[i])
-              for i, info in enumerate(self._video_infos)
-              if is_av(info.kind)]
-        if not av:
+        """Reset the trim to the overlap of every track after offsets change."""
+        tracks = [(info.duration, self._offsets[i])
+                  for i, info in enumerate(self._video_infos)]
+        if not tracks:
             return
-        durations = [d for d, _ in av]
-        offsets = [o for _, o in av]
+        durations = [d for d, _ in tracks]
+        offsets = [o for _, o in tracks]
         rng = common_time_range(durations, offsets)
         if rng.duration <= 0:  # no shared overlap -> fall back to the union
             rng = full_time_range(durations, offsets)
@@ -801,24 +594,15 @@ class SyncEditorWindow(QMainWindow):
         clamped = max(trim_start, min(trim_end, self._global_pos))
         if clamped != self._global_pos:
             self._global_pos = clamped
-            self._sync_seek_all(clamped)
+            self._preview.seek(clamped)
             self._timeline.set_playhead(clamped)
             self._update_time_label(clamped)
-        if self._is_playing and self._group_worker is not None:
-            self._group_worker.cmd("play")
 
     @Slot(int, bool)
     def _on_mute(self, index: int, muted: bool) -> None:
         if 0 <= index < len(self._muted):
             self._muted[index] = muted
-        self._audio.set_muted(self._muted)
-
-    def _on_audio_tick(self, position_s: float) -> None:
-        # Audio is the master clock while playing. Visuals normally ride the
-        # smooth 60 Hz render timer (which interpolates this same clock); this
-        # stays only as a fallback for when that timer isn't running.
-        if self._is_playing and not self._render_timer.isActive():
-            self._on_position_changed(position_s)
+        self._preview.set_muted(index, muted)
 
     @Slot(float)
     def _on_position_changed(self, global_s: float) -> None:
@@ -927,9 +711,14 @@ class SyncEditorWindow(QMainWindow):
                     f"{len(ok)} video(s) exported to:\n{output_dir}\n\n{files}",
                 )
 
-        worker.progress.connect(on_progress, Qt.ConnectionType.QueuedConnection)
-        worker.status.connect(on_status, Qt.ConnectionType.QueuedConnection)
-        worker.finished.connect(on_finished, Qt.ConnectionType.QueuedConnection)
+        # Pass self (a GUI-thread QObject) as the connection context so these
+        # slots run on the GUI thread. Without a context object a queued
+        # connection to a bare closure is delivered on the *sender's* thread —
+        # the worker thread — so touching the dialog or popping a QMessageBox
+        # from on_finished froze the app instead of reporting the result.
+        worker.progress.connect(self, on_progress)
+        worker.status.connect(self, on_status)
+        worker.finished.connect(self, on_finished)
         progress_dialog.canceled.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
         thread.started.connect(worker.run)
         thread.start()
@@ -938,8 +727,6 @@ class SyncEditorWindow(QMainWindow):
         self._export_worker = worker
 
     def closeEvent(self, event) -> None:
-        audio = getattr(self, "_audio", None)
-        if audio is not None:
-            audio.pause()
-        self._stop_group_worker()
+        if self._preview is not None:
+            self._preview.stop()
         super().closeEvent(event)

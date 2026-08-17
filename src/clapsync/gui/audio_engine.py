@@ -32,6 +32,27 @@ def played_position_s(origin_s: float, processed_us: float, base_us: float = 0.0
     return origin_s + (processed_us - base_us) / 1_000_000.0
 
 
+def audible_position_s(
+    origin_s: float,
+    processed_us: float,
+    buffered_bytes: int,
+    byte_rate: int,
+    base_us: float = 0.0,
+) -> float:
+    """Content seconds actually audible, from measured sink buffer occupancy.
+
+    processed_us counts samples pulled *into* the sink; buffered_bytes
+    (bufferSize - bytesFree) are the pulled bytes not yet emitted. Subtracting
+    them turns the pull-cursor time into what the speaker is emitting now, so the
+    video (which chases this clock) matches the sound rather than leading it by
+    the buffer. Floored at origin: right after start() the buffer fills before
+    any sound comes out, so the raw value would briefly read before origin.
+    """
+    pulled = origin_s + (processed_us - base_us) / 1_000_000.0
+    buffered_s = buffered_bytes / byte_rate if byte_rate else 0.0
+    return max(origin_s, pulled - buffered_s)
+
+
 def mix_block(
     tracks: list[np.ndarray],
     offsets: list[float],
@@ -110,6 +131,9 @@ class AudioEngine(QObject):
         self.enabled = True
         self._sink = None
         self._dev = None
+        # Format bytes-per-second, to convert queued sink bytes to seconds in
+        # the audible-position clock. Set once the format is built below.
+        self._byte_rate = 0
         try:
             from PySide6.QtMultimedia import (
                 QAudioFormat, QAudioSink, QMediaDevices,
@@ -121,6 +145,7 @@ class AudioEngine(QObject):
             fmt.setSampleRate(_RATE)
             fmt.setChannelCount(1)
             fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            self._byte_rate = fmt.bytesForDuration(1_000_000)  # bytes per second
             self._sink = QAudioSink(out, fmt)
             # 2 bytes/sample, mono: bound the pull buffer so the played-clock
             # doesn't lead the speaker by the backend's (large) default fill.
@@ -175,8 +200,10 @@ class AudioEngine(QObject):
         the c3d frame between playbacks.
         """
         if self._playing and self._sink is not None:
-            return played_position_s(
-                self._origin_s, self._sink.processedUSecs(), self._base_us
+            buffered = self._sink.bufferSize() - self._sink.bytesFree()
+            return audible_position_s(
+                self._origin_s, self._sink.processedUSecs(),
+                buffered, self._byte_rate, self._base_us,
             )
         return self._cursor / _RATE
 

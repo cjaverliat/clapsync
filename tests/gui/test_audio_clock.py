@@ -6,18 +6,32 @@ amount each run) — so the c3d marker and the clap sound never lined up twice.
 """
 import numpy as np
 
-from clapsync.gui.audio_engine import AudioEngine, played_position_s
+from clapsync.gui.audio_engine import (
+    AudioEngine,
+    audible_position_s,
+    played_position_s,
+)
+
+_BYTE_RATE = 48000 * 2  # mono int16: 96000 bytes/s
 
 
 class FakeSink:
-    """Minimal stand-in for QAudioSink's played-time counter."""
+    """Minimal stand-in for QAudioSink's played-time + buffer counters."""
 
     def __init__(self) -> None:
         self.us = 0.0
         self.started = False
+        self.buffer_size = 0     # bufferSize() bytes
+        self.bytes_free = 0      # bytesFree() bytes; buffered = size - free
 
     def processedUSecs(self) -> float:
         return self.us
+
+    def bufferSize(self) -> int:
+        return self.buffer_size
+
+    def bytesFree(self) -> int:
+        return self.bytes_free
 
     def start(self, _dev) -> None:
         self.started = True
@@ -48,6 +62,7 @@ def _engine_with(sink: FakeSink) -> AudioEngine:
     eng.enabled = True
     eng._sink = sink
     eng._dev = object()
+    eng._byte_rate = _BYTE_RATE
     eng._timer = _NoTimer()
     return eng
 
@@ -56,6 +71,22 @@ def test_played_position_helper():
     assert played_position_s(2.0, 500_000) == 2.5
     # in-play re-anchor: only microseconds past the baseline count
     assert played_position_s(2.0, 1_500_000, base_us=1_000_000) == 2.5
+
+
+def test_audible_position_subtracts_measured_buffer():
+    # 1.0 s pulled, 9600 bytes (=100 ms at 96000 B/s) still queued -> 0.9 s
+    # audible: the buffer lead is measured out, not guessed.
+    assert audible_position_s(0.0, 1_000_000, 9600, _BYTE_RATE) == 0.9
+
+
+def test_audible_position_floors_at_origin():
+    # Right after start(): little pulled, buffer full -> would read below origin;
+    # the clock must hold at origin, never run backward.
+    assert audible_position_s(3.0, 10_000, 9600, _BYTE_RATE) == 3.0
+
+
+def test_audible_position_zero_byte_rate_guard():
+    assert audible_position_s(2.0, 500_000, 9600, 0) == 2.5
 
 
 def test_position_tracks_played_time_not_pull_cursor():

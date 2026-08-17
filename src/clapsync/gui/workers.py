@@ -183,8 +183,8 @@ def compute_offsets_with_progress(
     Args:
         marker_choices: Optional resolved c3d clapperboard marker groups
             (see MarkerSelectionDialog), forwarded to the sync bridge.
-        media: Optional pre-probed MediaInfo (one per path). Probed on the main
-            thread and reused so the worker never re-probes fbx via bpy.
+        media: Optional pre-probed MediaInfo (one per path). Probed once and
+            reused so the worker never re-probes.
 
     Returns:
         Computed alignment, or None if cancelled or an error occurred.

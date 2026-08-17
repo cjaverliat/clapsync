@@ -10,9 +10,32 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from clapsync import diagnostics
 from clapsync.gui.media_selection_dialog import MediaSelectionDialog
-from clapsync.gui.progress import startup_progress
+from clapsync.gui.progress import run_blocking_with_progress, startup_progress
 
 logger = logging.getLogger(__name__)
+
+
+def _init_audio_devices() -> None:
+    """Force Qt's audio-endpoint enumeration once, up front.
+
+    The first ``QMediaDevices`` query enumerates every system audio endpoint and
+    Qt caches the result process-wide. On some Windows machines that takes ~12 s,
+    and it *always* blocks the GUI thread: Qt's Windows audio backend marshals
+    the call into the main thread, so running it on a worker thread freezes the
+    window just the same (measured: a single ``processEvents`` call blocked for
+    12.5 s). Since the stall cannot be hidden, it is paid here — once, at
+    startup, behind a dialog that says what is happening — rather than later
+    while the editor builds its ``AudioEngine``.
+
+    Failures are ignored: this is only a warm-up, and AudioEngine reports a
+    missing device itself.
+    """
+    try:
+        from PySide6.QtMultimedia import QMediaDevices
+
+        QMediaDevices.defaultAudioOutput()
+    except Exception:  # noqa: BLE001 — warm-up only, never fatal
+        logger.debug("audio device initialization failed", exc_info=True)
 
 
 def _report_crash(exc: BaseException) -> None:
@@ -125,14 +148,6 @@ def main() -> None:
     app = QApplication([sys.argv[0], *qt_args])
     diagnostics.install_qt_message_handler()
 
-    # bpy (Blender) is main-thread-only; the offset and export workers run on
-    # QThreads and touch fbx files, so route app.fbx's bpy work back to the main
-    # thread. Without this, an fbx input silently crashes the process (access
-    # violation, no traceback) the moment a worker calls into bpy.
-    from clapsync.app import fbx
-    from clapsync.gui.bpy_bridge import make_main_thread_executor
-    fbx.set_bpy_executor(make_main_thread_executor(app))
-
     # Allow CTRL+C to quit the Qt event loop.
     signal.signal(signal.SIGINT, lambda *_: app.quit())
     # Qt blocks the GIL; a periodic no-op timer lets Python check for signals.
@@ -140,10 +155,18 @@ def main() -> None:
     _sig_timer.start(200)
     _sig_timer.timeout.connect(lambda: None)
 
-    # log_startup_context imports torch and probes CUDA (~3s of blank window).
+    # log_startup_context imports torch and probes CUDA (several seconds). Run it
+    # off the main thread so the busy dialog keeps animating instead of freezing;
+    # it only logs (no Qt objects), so it is safe off-thread.
+    run_blocking_with_progress(
+        diagnostics.log_startup_context, "Checking environment…"
+    )
+    # Audio-endpoint enumeration cannot be moved off the GUI thread (see
+    # _init_audio_devices), so it runs here with the status text painted first:
+    # the marquee stops, but the user knows what the wait is for.
     with startup_progress() as status:
-        status("Checking environment…")
-        diagnostics.log_startup_context()
+        status("Initializing audio devices (first run can take a while)…")
+        _init_audio_devices()
     logger.info("logging to %s", log_file)
 
     sel = MediaSelectionDialog()
@@ -152,33 +175,38 @@ def main() -> None:
 
     video_paths = sel.get_media_paths()
 
-    # Two silent stages behind one busy dialog: probing every input (fbx probing
-    # runs bpy — main-thread-only — so it happens here and the result is reused
-    # for logging and offset computation, no worker re-probe), then loading the
-    # decode stack (torch/torchaudio/framepipe, kept out of module scope so the
-    # selection dialog above paints instantly).
-    probe_error: Exception | None = None
-    media: list | None = None
-    with startup_progress() as status:
-        status("Probing inputs…")
+    # Probe every input off the main thread so the busy dialog keeps animating
+    # instead of freezing while the inputs load. The result is reused for logging
+    # and offset computation (no worker re-probe).
+    def _probe_inputs() -> list:
         from clapsync.app.media import probe
-        try:
-            media = [probe(p) for p in video_paths]
-        except Exception as exc:  # noqa: BLE001 — surface a bad input, don't crash
-            media, probe_error = None, exc
-        if media is not None:
-            status("Loading sync engine…")
-            from clapsync.core import LOW_CONFIDENCE
-            from clapsync.gui.sync_editor import SyncEditorWindow
-            from clapsync.gui.workers import (
-                compute_offsets_with_progress,
-                prepare_proxies_with_progress,
-            )
-    if probe_error is not None:
+        return [probe(p) for p in video_paths]
+
+    try:
+        media = run_blocking_with_progress(_probe_inputs, "Probing inputs…")
+    except Exception as exc:  # noqa: BLE001 — surface a bad input, don't crash
         QMessageBox.critical(
-            None, "Error", f"Could not read an input file:\n{probe_error}"
+            None, "Error", f"Could not read an input file:\n{exc}"
         )
         sys.exit(1)
+
+    # Loading the decode stack (torch/torchaudio/framepipe) is a set of heavy
+    # imports kept out of module scope so earlier dialogs paint instantly. Run
+    # the actual module execution off the main thread so the busy dialog keeps
+    # animating; the module-scope re-import below is then a cached no-op. These
+    # modules only define classes at import — no QObject is built off-thread.
+    def _load_engine() -> None:
+        import clapsync.core  # noqa: F401
+        import clapsync.gui.sync_editor  # noqa: F401
+        import clapsync.gui.workers  # noqa: F401
+
+    run_blocking_with_progress(_load_engine, "Loading sync engine…")
+    from clapsync.core import LOW_CONFIDENCE
+    from clapsync.gui.sync_editor import SyncEditorWindow
+    from clapsync.gui.workers import (
+        compute_offsets_with_progress,
+        prepare_proxies_with_progress,
+    )
     diagnostics.log_inputs(video_paths, media=media)
 
     marker_choices = _resolve_marker_choices(video_paths)
