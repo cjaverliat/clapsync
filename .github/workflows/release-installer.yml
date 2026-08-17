@@ -24,7 +24,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          # Must satisfy requires-python in pyproject.toml — pip wheel runs
+          # against this interpreter.
+          python-version: '3.13'
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
