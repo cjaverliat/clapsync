@@ -2,6 +2,10 @@ name: Build Windows installer
 
 # Builds the online-bootstrap installer and attaches it to the release that
 # triggered the run. Also runnable manually against an existing tag.
+#
+# The tag is resolved before checkout and used as the checkout ref, so the
+# installer is always built from the exact tree it gets attached to — a manual
+# run cannot ship a build of some other branch under a release's name.
 
 on:
   release:
@@ -18,8 +22,20 @@ jobs:
     permissions:
       contents: write   # upload the installer as a release asset
     steps:
-      - name: Check out clapsync
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out clapsync at the release tag
         uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -33,16 +49,6 @@ jobs:
 
       - name: Build installer
         run: python installer/build.py
-
-      - name: Resolve release tag
-        id: tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Attach installer to release
         shell: bash
