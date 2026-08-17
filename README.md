@@ -66,10 +66,22 @@ timeline for you:
   and bottom arm markers collapsing at peak closing speed.
 - Matching the two gives the mocap offset, accurate below one frame.
 
-Markers are recognized by name when their labels hold a clapperboard keyword
-(`clap` or `slate`) plus a direction (`top`/`upper`/`up` vs
-`bottom`/`lower`/`low`/`down`). Otherwise the app asks you to pick the top and
-bottom markers yourself.
+#### Finding the clapperboard in the c3d
+
+Your clapperboard needs markers on both arms, and clapsync groups them by label:
+a name holding a clapperboard keyword (`clap` or `slate`) plus a direction
+(`top`/`upper`/`up` vs `bottom`/`lower`/`low`/`down`), case ignored. So
+`Clap_Top_1` and `slate_bottom_L` are recognized. Otherwise the app asks you to
+pick the markers of each arm yourself.
+
+It then watches the two arms close, ignoring frames where the markers are
+occluded or clearly mistracked. A capture often holds several snaps, a
+positioning close then the real clap, so the sharpest one wins.
+
+The app draws that clap and its matching sound as flags on the timeline. If the
+wrong snap was picked, park the playhead on the true clap and press **Set c3d
+clap (at playhead)**, or **Set clap sound (at playhead)** to move the audio side
+instead. The c3d is re-synced right away.
 
 On export, a `.c3d` yields a `<name>_trim.txt` beside the synced clips, holding
 the trim's `start_frame` and `end_frame` **in the c3d's own numbering**. Cut the
