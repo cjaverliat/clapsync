@@ -1,8 +1,9 @@
 import numpy as np
 import torch
 
-from clapsync.core.offsets import find_offset, _parabolic_peak
+from clapsync.core.offsets import align_waveforms, find_offset, _parabolic_peak
 from clapsync.core.offsets import PairAlignment, find_offset_peaks
+from clapsync.core.solver import EDGE_MIN_SCORE
 
 
 def _noise(n: int, seed: int) -> np.ndarray:
@@ -117,3 +118,53 @@ def test_mfcc_correlate_recovers_full_length_shift():
     offset, score = result.peaks[0]
     assert abs(offset - (-0.30)) < 0.02   # rolled later -> query lags -> negative
     assert score > 20.0
+
+
+def _codec_limited(x: np.ndarray, sr: int, cutoff: float = 20000.0) -> torch.Tensor:
+    """Brick-wall `x` above `cutoff`, the way a lossy codec bands-limits audio.
+
+    Every camera writes AAC/MP3, so a real 48 kHz track carries no content in
+    the top few kHz of its own Nyquist range.
+    """
+    spectrum = np.fft.rfft(x)
+    freqs = np.fft.rfftfreq(x.size, 1.0 / sr)
+    spectrum[freqs > cutoff] = 0.0
+    limited = np.fft.irfft(spectrum, n=x.size)
+    return torch.from_numpy(limited.astype(np.float32)).unsqueeze(0)
+
+
+def _overlapping_pair(sr: int) -> tuple[np.ndarray, np.ndarray]:
+    """Two 6 s takes sharing a 3 s burst, each with its own room noise."""
+    rng = np.random.default_rng(7)
+    burst = rng.standard_normal(int(sr * 3.0)) * 0.3
+    takes = []
+    for lead in (1.0, 2.5):  # cam_b starts its burst 1.5 s later
+        x = rng.standard_normal(int(sr * 6.0)) * 0.05
+        start = int(lead * sr)
+        x[start : start + burst.size] += burst
+        takes.append(x)
+    return takes[0], takes[1]
+
+
+def test_find_offset_peaks_scores_high_on_band_limited_48khz():
+    # Regression: the MFCC analysis band must not follow the input rate. With
+    # f_max left at Nyquist, a 48 kHz track whose content stops at a codec
+    # cutoff is analysed with mel filters over an empty region, and the score
+    # for a correct peak collapsed from ~22 to ~3 — under the solver's edge
+    # gate, so align_waveforms called a matching pair unrelated audio.
+    sr = 48000
+    a, b = _overlapping_pair(sr)
+    ref = _codec_limited(a, sr)
+    sub = _codec_limited(b, sr)
+    offset, score = find_offset_peaks(ref, sr, sub, sr).peaks[0]
+    assert abs(offset - (-1.5)) < 0.02
+    assert score > EDGE_MIN_SCORE
+
+
+def test_align_waveforms_syncs_band_limited_48khz_without_warning():
+    sr = 48000
+    a, b = _overlapping_pair(sr)
+    result = align_waveforms([_codec_limited(a, sr), _codec_limited(b, sr)],
+                             [sr, sr])
+    assert abs(result.offsets[1] - (-1.5)) < 0.02
+    assert not result.warnings

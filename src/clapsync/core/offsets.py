@@ -17,6 +17,15 @@ Refine = Literal["none", "parabolic"]
 _MAX_PEAKS = 5
 _EXCLUSION_S = 0.5
 
+# Upper edge of the MFCC analysis band. Pinned in Hz rather than left at the
+# input's Nyquist so the features do not change with the sample rate (hop and
+# window are already specified as durations for the same reason). Camera audio
+# is lossy-coded and brick-walled well below Nyquist; mel filters spanning that
+# empty region flatten the log-mel vector, and the 13 retained cepstral
+# coefficients then describe the informative bands far more coarsely, which
+# drops a correct peak's score under the solver's edge gate.
+_F_MAX_HZ = 8000.0
+
 
 @dataclass(frozen=True)
 class PairAlignment:
@@ -129,6 +138,7 @@ def _compute_mfcc(
     win_length: int,
     n_mels: int,
     mel_scale: Literal["htk", "slaney"],
+    f_max: float,
 ) -> torch.Tensor:
     """Compute MFCC features for a mono audio array.
 
@@ -145,6 +155,7 @@ def _compute_mfcc(
         win_length: Window length in samples.
         n_mels: Number of mel filter banks.
         mel_scale: Mel scale type ("htk" or "slaney").
+        f_max: Upper edge of the mel filterbank in Hz, clamped to Nyquist.
 
     Returns:
         Float32 tensor of shape (n_mfcc, T) on CPU.
@@ -160,6 +171,7 @@ def _compute_mfcc(
             "win_length": win_length,
             "n_mels": n_mels,
             "mel_scale": mel_scale,
+            "f_max": min(f_max, sample_rate / 2),
         },
     )
     return mfcc_fn(waveform).squeeze(0)  # (n_mfcc, T)
@@ -225,6 +237,7 @@ def find_offset_peaks(
     win_duration: float = 0.04,
     n_mels: int = 128,
     mel_scale: Literal["htk", "slaney"] = "htk",
+    f_max: float = _F_MAX_HZ,
 ) -> PairAlignment:
     """Temporal offset between two waveforms via MFCC cross-correlation.
 
@@ -234,7 +247,8 @@ def find_offset_peaks(
         waveform: Query audio, resampled to ref_rate if rates differ.
         rate: Query sample rate in Hz.
         refine: "parabolic" (sub-hop interpolation) or "none" (integer hop).
-        n_mfcc, n_fft, hop_duration, win_duration, n_mels, mel_scale: MFCC params.
+        n_mfcc, n_fft, hop_duration, win_duration, n_mels, mel_scale, f_max:
+            MFCC params. f_max is clamped to Nyquist.
 
     Returns:
         PairAlignment ranking up to _MAX_PEAKS candidate lags, best first.
@@ -252,11 +266,11 @@ def find_offset_peaks(
 
     mfcc_ref = _compute_mfcc(
         ref_mono, ref_rate, n_mfcc, n_fft, hop_length, win_length,
-        n_mels, mel_scale,
+        n_mels, mel_scale, f_max,
     )
     mfcc_sub = _compute_mfcc(
         sub_mono, ref_rate, n_mfcc, n_fft, hop_length, win_length,
-        n_mels, mel_scale,
+        n_mels, mel_scale, f_max,
     )
 
     corr = _mfcc_cross_correlate(mfcc_ref, mfcc_sub)
@@ -278,13 +292,14 @@ def find_offset(
     win_duration: float = 0.04,
     n_mels: int = 128,
     mel_scale: Literal["htk", "slaney"] = "htk",
+    f_max: float = _F_MAX_HZ,
 ) -> float:
     """Primary temporal offset between two waveforms (see find_offset_peaks)."""
     return find_offset_peaks(
         ref_waveform, ref_rate, waveform, rate,
         refine=refine, n_mfcc=n_mfcc, n_fft=n_fft,
         hop_duration=hop_duration, win_duration=win_duration,
-        n_mels=n_mels, mel_scale=mel_scale,
+        n_mels=n_mels, mel_scale=mel_scale, f_max=f_max,
     ).peaks[0][0]
 
 
@@ -333,7 +348,8 @@ def align_waveforms(
             wave = AF.resample(wave, orig_freq=r, new_freq=rate)
         monos.append(_to_mono_f64(wave))
     mfccs = [
-        _compute_mfcc(m, rate, 13, 2048, hop_length, win_length, 128, "htk")
+        _compute_mfcc(m, rate, 13, 2048, hop_length, win_length, 128, "htk",
+                      _F_MAX_HZ)
         for m in monos
     ]
 
