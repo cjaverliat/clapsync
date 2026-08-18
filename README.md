@@ -190,7 +190,7 @@ sub-frame alignment even when the true offset falls between frames.
 
 Runnable scripts in [`examples/`](examples/):
 
-- [`find_sync.py`](examples/find_sync.py): pure, torchaudio + `clapsync.core` only, no media libraries
+- [`find_sync.py`](examples/find_sync.py): pure, `clapsync.core` on WAV data read with the standard library, no media libraries
 - [`auto_sync_trim.py`](examples/auto_sync_trim.py): one-call sync & export
 - [`export_custom.py`](examples/export_custom.py): manual pipeline, custom size/fps
 
