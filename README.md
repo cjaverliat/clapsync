@@ -17,6 +17,8 @@ library:
 
 ## The app (GUI)
 
+<img src="docs/clapsync/editor_overview_small.png" alt="The clapsync sync editor: preview mosaic on top, tracks and trim handles on the timeline below" width="720">
+
 ### Install on Windows
 
 Download `clapsync-setup-<version>.exe` from the
